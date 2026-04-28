@@ -1129,6 +1129,7 @@ export async function runAgentTurnWithFallback(params: {
       const outcomePlan = buildAgentRuntimeOutcomePlan();
       const fallbackResult = await runWithModelFallback<EmbeddedAgentRunResult>({
         ...resolveModelFallbackOptions(effectiveRun, runtimeConfig),
+        transientRetry: { enabled: true },
         runId,
         classifyResult: async ({ result, provider, model }) => {
           const classification = outcomePlan.classifyRunResult({

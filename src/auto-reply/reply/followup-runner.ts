@@ -264,6 +264,7 @@ export function createFollowupRunner(params: {
         const outcomePlan = buildAgentRuntimeOutcomePlan();
         const fallbackResult = await runWithModelFallback<EmbeddedAgentRunResult>({
           ...resolveModelFallbackOptions(run, runtimeConfig),
+          transientRetry: { enabled: true },
           cfg: runtimeConfig,
           runId,
           classifyResult: ({ result, provider, model }) =>
