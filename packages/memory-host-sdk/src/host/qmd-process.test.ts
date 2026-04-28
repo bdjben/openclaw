@@ -4,23 +4,35 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const spawnMock = vi.hoisted(() => vi.fn());
+const { spawnMock, spawnSyncMock } = vi.hoisted(() => ({
+  spawnMock: vi.fn(),
+  spawnSyncMock: vi.fn(),
+}));
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
   return {
     ...actual,
     spawn: spawnMock,
+    spawnSync: spawnSyncMock,
   };
 });
 
-import { checkQmdBinaryAvailability, resolveCliSpawnInvocation } from "./qmd-process.js";
+import {
+  checkQmdBinaryAvailability,
+  resolveCliSpawnInvocation,
+  runCliCommand,
+} from "./qmd-process.js";
 
 function createMockChild() {
   const child = new EventEmitter() as EventEmitter & {
     kill: ReturnType<typeof vi.fn>;
+    stdout: EventEmitter;
+    stderr: EventEmitter;
   };
   child.kill = vi.fn();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
   return child;
 }
 
@@ -53,6 +65,7 @@ afterEach(() => {
   process.env.PATH = originalPath;
   process.env.PATHEXT = originalPathExt;
   spawnMock.mockReset();
+  spawnSyncMock.mockReset();
   tempDir = "";
 });
 
@@ -119,6 +132,34 @@ describe("resolveCliSpawnInvocation", () => {
     expect(invocation.command).toBe("qmd");
     expect(invocation.argv).toEqual(["query", "hello"]);
     expect(invocation.shell).not.toBe(true);
+  });
+});
+
+describe("runCliCommand", () => {
+  it("decodes Windows codepage output across split qmd stdout and stderr chunks", async () => {
+    spawnSyncMock.mockReturnValue({ stdout: "Active code page: 936", stderr: "" });
+    const child = createMockChild();
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        child.stdout.emit("data", Buffer.from([0xb2]));
+        child.stdout.emit("data", Buffer.from([0xe2, 0xca]));
+        child.stdout.emit("data", Buffer.from([0xd4]));
+        child.stderr.emit("data", Buffer.from([0xa3]));
+        child.stderr.emit("data", Buffer.from([0xbb]));
+        child.emit("close", 0);
+      });
+      return child;
+    });
+
+    await expect(
+      runCliCommand({
+        commandSummary: "qmd query",
+        spawnInvocation: { command: "qmd", argv: ["query"] },
+        env: process.env,
+        cwd: tempDir,
+        maxOutputChars: 1_000,
+      }),
+    ).resolves.toEqual({ stdout: "测试", stderr: "；" });
   });
 });
 

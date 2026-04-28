@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createWindowsOutputDecoder } from "./windows-output-decoder.js";
 import { materializeWindowsSpawnProgram, resolveWindowsSpawnProgram } from "./windows-spawn.js";
 
 export type CliSpawnInvocation = {
@@ -114,6 +115,8 @@ export async function runCliCommand(params: {
     let stderr = "";
     let stdoutTruncated = false;
     let stderrTruncated = false;
+    const stdoutDecoder = createWindowsOutputDecoder();
+    const stderrDecoder = createWindowsOutputDecoder();
     const discardStdout = params.discardStdout === true;
     const timer = params.timeoutMs
       ? setTimeout(() => {
@@ -125,12 +128,12 @@ export async function runCliCommand(params: {
       if (discardStdout) {
         return;
       }
-      const next = appendOutputWithCap(stdout, data.toString("utf8"), params.maxOutputChars);
+      const next = appendOutputWithCap(stdout, stdoutDecoder.decode(data), params.maxOutputChars);
       stdout = next.text;
       stdoutTruncated = stdoutTruncated || next.truncated;
     });
     child.stderr.on("data", (data) => {
-      const next = appendOutputWithCap(stderr, data.toString("utf8"), params.maxOutputChars);
+      const next = appendOutputWithCap(stderr, stderrDecoder.decode(data), params.maxOutputChars);
       stderr = next.text;
       stderrTruncated = stderrTruncated || next.truncated;
     });
@@ -144,6 +147,14 @@ export async function runCliCommand(params: {
       if (timer) {
         clearTimeout(timer);
       }
+      if (!discardStdout) {
+        const next = appendOutputWithCap(stdout, stdoutDecoder.flush(), params.maxOutputChars);
+        stdout = next.text;
+        stdoutTruncated = stdoutTruncated || next.truncated;
+      }
+      const nextStderr = appendOutputWithCap(stderr, stderrDecoder.flush(), params.maxOutputChars);
+      stderr = nextStderr.text;
+      stderrTruncated = stderrTruncated || nextStderr.truncated;
       if (!discardStdout && (stdoutTruncated || stderrTruncated)) {
         reject(
           new Error(

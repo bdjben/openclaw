@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { danger, shouldLogVerbose } from "../globals.js";
 import { markOpenClawExecEnv } from "../infra/openclaw-exec-env.js";
 import {
+  createWindowsOutputDecoder,
   decodeWindowsOutputBuffer,
   resolveWindowsConsoleEncoding,
 } from "../infra/windows-encoding.js";
@@ -297,9 +298,10 @@ export async function runCommandWithTimeout(
   });
   // Spawn with inherited stdin (TTY) so tools like `pi` stay interactive when needed.
   return await new Promise((resolve, reject) => {
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    const windowsEncoding = resolveWindowsConsoleEncoding();
+    let stdout = "";
+    let stderr = "";
+    const stdoutDecoder = createWindowsOutputDecoder();
+    const stderrDecoder = createWindowsOutputDecoder();
     let settled = false;
     let timedOut = false;
     let noOutputTimedOut = false;
@@ -362,11 +364,11 @@ export async function runCommandWithTimeout(
     }
 
     child.stdout?.on("data", (d) => {
-      stdoutChunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d));
+      stdout += stdoutDecoder.decode(d);
       armNoOutputTimer();
     });
     child.stderr?.on("data", (d) => {
-      stderrChunks.push(Buffer.isBuffer(d) ? d : Buffer.from(d));
+      stderr += stderrDecoder.decode(d);
       armNoOutputTimer();
     });
     child.on("error", (err) => {
@@ -423,16 +425,12 @@ export async function runCommandWithTimeout(
             ? 124
             : resolvedCode
           : resolvedCode;
+      stdout += stdoutDecoder.flush();
+      stderr += stderrDecoder.flush();
       resolve({
         pid: child.pid ?? undefined,
-        stdout: decodeWindowsOutputBuffer({
-          buffer: Buffer.concat(stdoutChunks),
-          windowsEncoding,
-        }),
-        stderr: decodeWindowsOutputBuffer({
-          buffer: Buffer.concat(stderrChunks),
-          windowsEncoding,
-        }),
+        stdout,
+        stderr,
         code: normalizedCode,
         signal: resolvedSignal,
         killed: child.killed,

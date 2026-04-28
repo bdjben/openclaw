@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { Component, SelectItem } from "@mariozechner/pi-tui";
+import { createWindowsOutputDecoder } from "../infra/windows-encoding.js";
 import { createSearchableSelectList } from "./components/selectors.js";
 
 type LocalShellDeps = {
@@ -19,6 +20,7 @@ type LocalShellDeps = {
     onCancel?: () => void;
   };
   spawnCommand?: typeof spawn;
+  createOutputDecoder?: typeof createWindowsOutputDecoder;
   getCwd?: () => string;
   env?: NodeJS.ProcessEnv;
   maxOutputChars?: number;
@@ -29,6 +31,7 @@ export function createLocalShellRunner(deps: LocalShellDeps) {
   let localExecAllowed = false;
   const createSelector = deps.createSelector ?? createSearchableSelectList;
   const spawnCommand = deps.spawnCommand ?? spawn;
+  const createOutputDecoder = deps.createOutputDecoder ?? createWindowsOutputDecoder;
   const getCwd = deps.getCwd ?? (() => process.cwd());
   const env = deps.env ?? process.env;
   const maxChars = deps.maxOutputChars ?? 40_000;
@@ -116,14 +119,18 @@ export function createLocalShellRunner(deps: LocalShellDeps) {
 
       let stdout = "";
       let stderr = "";
+      const stdoutDecoder = createOutputDecoder();
+      const stderrDecoder = createOutputDecoder();
       child.stdout.on("data", (buf) => {
-        stdout = appendWithCap(stdout, buf.toString("utf8"));
+        stdout = appendWithCap(stdout, stdoutDecoder.decode(buf));
       });
       child.stderr.on("data", (buf) => {
-        stderr = appendWithCap(stderr, buf.toString("utf8"));
+        stderr = appendWithCap(stderr, stderrDecoder.decode(buf));
       });
 
       child.on("close", (code, signal) => {
+        stdout = appendWithCap(stdout, stdoutDecoder.flush());
+        stderr = appendWithCap(stderr, stderrDecoder.flush());
         const combined = (stdout + (stderr ? (stdout ? "\n" : "") + stderr : ""))
           .slice(0, maxChars)
           .trimEnd();
