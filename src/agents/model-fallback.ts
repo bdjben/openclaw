@@ -349,17 +349,23 @@ async function waitForTransientRetryBackoff(params: {
     return;
   }
   await new Promise<void>((resolve, reject) => {
-    let timeout: ReturnType<typeof setTimeout>;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const onAbort = () => {
-      clearTimeout(timeout);
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       abortSignal?.removeEventListener("abort", onAbort);
       reject(createTransientRetryAbortError());
     };
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    if (abortSignal?.aborted) {
+      onAbort();
+      return;
+    }
     timeout = setTimeout(() => {
       abortSignal?.removeEventListener("abort", onAbort);
       resolve();
     }, delayMs);
-    abortSignal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
