@@ -121,6 +121,23 @@ describe("pi-embedded runner run registry", () => {
     expect(queueMessage).not.toHaveBeenCalled();
   });
 
+  it("fails closed when stopped state checks throw", () => {
+    const queueMessage = vi.fn(async () => {});
+
+    setActiveEmbeddedRun(
+      "session-bad-state",
+      createRunHandle({
+        isStopped: () => {
+          throw new Error("bad stopped state");
+        },
+        queueMessage,
+      }),
+    );
+
+    expect(queueEmbeddedPiMessage("session-bad-state", "keep going")).toBe(false);
+    expect(queueMessage).not.toHaveBeenCalled();
+  });
+
   it("waits for active runs to drain", async () => {
     vi.useFakeTimers();
     try {

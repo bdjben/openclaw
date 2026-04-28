@@ -38,7 +38,6 @@ function makeRunReplyAgentParams(
     shouldSteer: true,
     shouldFollowup: false,
     isActive: true,
-    isStreaming: false,
     typing: createMockTypingController(),
     sessionCtx: {
       Provider: "whatsapp",

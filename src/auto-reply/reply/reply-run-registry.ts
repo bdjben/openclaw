@@ -175,6 +175,14 @@ function getAttachedBackend(operation: ReplyOperation): ReplyBackendHandle | und
   return attachedBackendByOperation.get(operation);
 }
 
+function isReplyBackendMessageInjectable(backend: ReplyBackendHandle): boolean {
+  try {
+    return backend.isStopped === undefined ? backend.isStreaming() : !backend.isStopped();
+  } catch {
+    return false;
+  }
+}
+
 function clearReplyRunState(params: { sessionKey: string; sessionId: string }): void {
   replyRunState.activeRunsByKey.delete(params.sessionKey);
   if (replyRunState.activeSessionIdsByKey.get(params.sessionKey) === params.sessionId) {
@@ -464,9 +472,7 @@ export function queueReplyRunMessage(sessionId: string, text: string): boolean {
   if (!operation || operation.phase !== "running" || !backend?.queueMessage) {
     return false;
   }
-  const isMessageInjectable =
-    backend.isStopped === undefined ? backend.isStreaming() : !backend.isStopped();
-  if (!isMessageInjectable) {
+  if (!isReplyBackendMessageInjectable(backend)) {
     return false;
   }
   void backend.queueMessage(text);

@@ -130,6 +130,29 @@ describe("reply run registry", () => {
     expect(queueMessage).not.toHaveBeenCalled();
   });
 
+  it("fails closed when backend stopped state checks throw", async () => {
+    const queueMessage = vi.fn(async () => {});
+    const operation = createReplyOperation({
+      sessionKey: "agent:main:main",
+      sessionId: "session-running",
+      resetTriggered: false,
+    });
+
+    operation.attachBackend({
+      kind: "embedded",
+      cancel: vi.fn(),
+      isStreaming: () => true,
+      isStopped: () => {
+        throw new Error("bad stopped state");
+      },
+      queueMessage,
+    });
+    operation.setPhase("running");
+
+    expect(queueReplyRunMessage("session-running", "hello")).toBe(false);
+    expect(queueMessage).not.toHaveBeenCalled();
+  });
+
   it("aborts compacting runs through the registry compatibility helper", () => {
     const compactingOperation = createReplyOperation({
       sessionKey: "agent:main:main",
