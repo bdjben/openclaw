@@ -88,6 +88,48 @@ describe("reply run registry", () => {
     expect(queueMessage).toHaveBeenCalledWith("hello");
   });
 
+  it("queues messages through active non-streaming backends with stopped state", async () => {
+    const queueMessage = vi.fn(async () => {});
+    const operation = createReplyOperation({
+      sessionKey: "agent:main:main",
+      sessionId: "session-running",
+      resetTriggered: false,
+    });
+
+    operation.attachBackend({
+      kind: "embedded",
+      cancel: vi.fn(),
+      isStreaming: () => false,
+      isStopped: () => false,
+      queueMessage,
+    });
+    operation.setPhase("running");
+
+    expect(queueReplyRunMessage("session-running", "hello")).toBe(true);
+    expect(queueMessage).toHaveBeenCalledWith("hello");
+  });
+
+  it("does not queue messages through stopped backends", async () => {
+    const queueMessage = vi.fn(async () => {});
+    const operation = createReplyOperation({
+      sessionKey: "agent:main:main",
+      sessionId: "session-running",
+      resetTriggered: false,
+    });
+
+    operation.attachBackend({
+      kind: "embedded",
+      cancel: vi.fn(),
+      isStreaming: () => true,
+      isStopped: () => true,
+      queueMessage,
+    });
+    operation.setPhase("running");
+
+    expect(queueReplyRunMessage("session-running", "hello")).toBe(false);
+    expect(queueMessage).not.toHaveBeenCalled();
+  });
+
   it("aborts compacting runs through the registry compatibility helper", () => {
     const compactingOperation = createReplyOperation({
       sessionKey: "agent:main:main",

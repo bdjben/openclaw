@@ -11,6 +11,7 @@ export type ReplyBackendHandle = {
   readonly kind: ReplyBackendKind;
   cancel(reason?: ReplyBackendCancelReason): void;
   isStreaming(): boolean;
+  isStopped?: () => boolean;
   queueMessage?: (text: string) => Promise<void>;
   /**
    * Compatibility-only hook so legacy "abort compacting runs" paths can still
@@ -463,7 +464,9 @@ export function queueReplyRunMessage(sessionId: string, text: string): boolean {
   if (!operation || operation.phase !== "running" || !backend?.queueMessage) {
     return false;
   }
-  if (!backend.isStreaming()) {
+  const isMessageInjectable =
+    backend.isStopped === undefined ? backend.isStreaming() : !backend.isStopped();
+  if (!isMessageInjectable) {
     return false;
   }
   void backend.queueMessage(text);

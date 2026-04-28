@@ -67,7 +67,9 @@ export function queueEmbeddedPiMessage(sessionId: string, text: string): boolean
     diag.debug(`queue message failed: sessionId=${sessionId} reason=no_active_run`);
     return false;
   }
-  if (!handle.isStreaming()) {
+  const isMessageInjectable =
+    handle.isStopped === undefined ? handle.isStreaming() : !handle.isStopped();
+  if (!isMessageInjectable) {
     diag.debug(`queue message failed: sessionId=${sessionId} reason=not_streaming`);
     return false;
   }
