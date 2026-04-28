@@ -1,5 +1,6 @@
 import { importFreshModule } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MAX_INJECTED_STEER_MESSAGE_CHARS } from "../../shared/steer-message-injection-policy.js";
 import {
   __testing,
   abortEmbeddedPiRun,
@@ -88,6 +89,25 @@ describe("pi-embedded runner run registry", () => {
 
     expect(queueEmbeddedPiMessage("session-active", "keep going")).toBe(true);
     expect(queueMessage).toHaveBeenCalledWith("keep going");
+  });
+
+  it("rejects oversized messages for active runs", () => {
+    const queueMessage = vi.fn(async () => {});
+
+    setActiveEmbeddedRun(
+      "session-too-large",
+      createRunHandle({
+        queueMessage,
+      }),
+    );
+
+    expect(
+      queueEmbeddedPiMessage(
+        "session-too-large",
+        "x".repeat(MAX_INJECTED_STEER_MESSAGE_CHARS + 1),
+      ),
+    ).toBe(false);
+    expect(queueMessage).not.toHaveBeenCalled();
   });
 
   it("keeps the streaming fallback for handles without stopped state", () => {

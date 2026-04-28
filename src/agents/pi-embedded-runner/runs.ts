@@ -12,6 +12,7 @@ import {
   logMessageQueued,
   logSessionStateChange,
 } from "../../logging/diagnostic.js";
+import { validateSteerMessageInjection } from "../../shared/steer-message-injection-policy.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import {
   ACTIVE_EMBEDDED_RUNS,
@@ -65,6 +66,11 @@ export function queueEmbeddedPiMessage(sessionId: string, text: string): boolean
       return true;
     }
     diag.debug(`queue message failed: sessionId=${sessionId} reason=no_active_run`);
+    return false;
+  }
+  const injectionPolicy = validateSteerMessageInjection({ sessionId, text });
+  if (!injectionPolicy.ok) {
+    diag.debug(`queue message failed: sessionId=${sessionId} reason=${injectionPolicy.reason}`);
     return false;
   }
   let isMessageInjectable = false;

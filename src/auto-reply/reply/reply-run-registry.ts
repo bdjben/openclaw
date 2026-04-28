@@ -1,5 +1,6 @@
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
+import { validateSteerMessageInjection } from "../../shared/steer-message-injection-policy.js";
 
 export type ReplyRunKey = string;
 
@@ -470,6 +471,9 @@ export function queueReplyRunMessage(sessionId: string, text: string): boolean {
   const operation = resolveReplyRunForCurrentSessionId(sessionId);
   const backend = operation ? getAttachedBackend(operation) : undefined;
   if (!operation || operation.phase !== "running" || !backend?.queueMessage) {
+    return false;
+  }
+  if (!validateSteerMessageInjection({ sessionId, text }).ok) {
     return false;
   }
   if (!isReplyBackendMessageInjectable(backend)) {
