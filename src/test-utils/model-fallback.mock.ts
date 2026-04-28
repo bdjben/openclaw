@@ -4,7 +4,7 @@ export const runWithModelFallback = vi.fn(
   async (params: {
     provider: string;
     model: string;
-    transientRetry?: { enabled?: boolean };
+    transientRetry?: { enabled?: boolean; runIsIdempotent?: boolean };
     run: (
       provider: string,
       model: string,

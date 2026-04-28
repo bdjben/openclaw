@@ -464,7 +464,7 @@ function createAsyncReplySpy() {
 }
 
 describe("createFollowupRunner runtime config", () => {
-  it("enables same-model transient retry for queued followup runs", async () => {
+  it("does not enable same-model transient retry for queued followup runs", async () => {
     runEmbeddedPiAgentMock.mockResolvedValueOnce({
       payloads: [],
       meta: {},
@@ -486,7 +486,7 @@ describe("createFollowupRunner runtime config", () => {
     );
 
     expect(runWithModelFallbackMock).toHaveBeenCalledOnce();
-    expect(runWithModelFallbackMock.mock.calls[0][0].transientRetry).toEqual({ enabled: true });
+    expect(runWithModelFallbackMock.mock.calls[0][0].transientRetry).toBeUndefined();
   });
 
   it("uses the active runtime snapshot for queued embedded followup runs", async () => {

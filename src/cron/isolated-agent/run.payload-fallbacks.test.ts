@@ -53,6 +53,6 @@ describe("runCronIsolatedAgentTurn — payload.fallbacks", () => {
     expect(result.status).toBe("ok");
     expect(runWithModelFallbackMock).toHaveBeenCalledOnce();
     expect(runWithModelFallbackMock.mock.calls[0][0].fallbacksOverride).toEqual(expectedFallbacks);
-    expect(runWithModelFallbackMock.mock.calls[0][0].transientRetry).toEqual({ enabled: true });
+    expect(runWithModelFallbackMock.mock.calls[0][0].transientRetry).toBeUndefined();
   });
 });

@@ -73,13 +73,16 @@ export type ModelFallbackRunOptions = {
 
 type ModelFallbackTransientRetryOptions = {
   enabled?: boolean;
+  runIsIdempotent?: boolean;
   maxRetries?: number;
   backoffMs?: readonly number[];
+  abortSignal?: AbortSignal;
 };
 
 type ResolvedTransientRetryPolicy = {
   maxRetries: number;
   backoffMs: readonly number[];
+  abortSignal?: AbortSignal;
 };
 
 type ModelFallbackRunFn<T> = (
@@ -176,6 +179,7 @@ type ModelFallbackResultClassifier<T> = (attempt: {
   model: string;
   attempt: number;
   total: number;
+  transientRetryAttempt: number;
 }) => ModelFallbackResultClassification | Promise<ModelFallbackResultClassification>;
 
 type ModelFallbackRunResult<T> = {
@@ -245,6 +249,7 @@ async function runFallbackAttempt<T>(params: {
   classifyResult?: ModelFallbackResultClassifier<T>;
   attempt: number;
   total: number;
+  transientRetryAttempt: number;
 }): Promise<{ success: ModelFallbackRunResult<T> } | { error: unknown }> {
   const runResult = await runFallbackCandidate({
     run: params.run,
@@ -259,6 +264,7 @@ async function runFallbackAttempt<T>(params: {
       model: params.model,
       attempt: params.attempt,
       total: params.total,
+      transientRetryAttempt: params.transientRetryAttempt,
     });
     const classifiedError = resolveResultClassificationError(classification, {
       provider: params.provider,
@@ -304,13 +310,17 @@ function normalizeTransientRetryBackoff(value: readonly number[] | undefined): r
 function resolveTransientRetryPolicy(
   options: ModelFallbackTransientRetryOptions | undefined,
 ): ResolvedTransientRetryPolicy {
-  if (!options?.enabled) {
+  if (!options?.enabled || !options.runIsIdempotent) {
     return { maxRetries: 0, backoffMs: DEFAULT_TRANSIENT_RETRY_BACKOFF_MS };
   }
-  return {
+  const policy: ResolvedTransientRetryPolicy = {
     maxRetries: clampTransientRetryCount(options.maxRetries),
     backoffMs: normalizeTransientRetryBackoff(options.backoffMs),
   };
+  if (options.abortSignal) {
+    policy.abortSignal = options.abortSignal;
+  }
+  return policy;
 }
 
 function isServerErrorStatus(status: number | undefined): boolean {
@@ -329,12 +339,34 @@ async function waitForTransientRetryBackoff(params: {
   policy: ResolvedTransientRetryPolicy;
   retryIndex: number;
 }): Promise<void> {
+  const abortSignal = params.policy.abortSignal;
+  if (abortSignal?.aborted) {
+    throw createTransientRetryAbortError();
+  }
   const delayMs =
     params.policy.backoffMs[Math.min(params.retryIndex, params.policy.backoffMs.length - 1)] ?? 0;
   if (delayMs <= 0) {
     return;
   }
-  await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+  await new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timeout);
+      abortSignal?.removeEventListener("abort", onAbort);
+      reject(createTransientRetryAbortError());
+    };
+    timeout = setTimeout(() => {
+      abortSignal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function createTransientRetryAbortError(): Error {
+  const error = new Error("Aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 function resolveResultClassificationError(
@@ -986,6 +1018,7 @@ export async function runWithModelFallback<T>(params: {
         classifyResult: params.classifyResult,
         attempt: i + 1,
         total: candidates.length,
+        transientRetryAttempt: sameModelTransientRetries,
       });
       if ("success" in attemptRun) {
         if (i > 0 || attempts.length > 0 || attemptedDuringCooldown) {
@@ -1171,6 +1204,7 @@ export async function runWithImageModelFallback<T>(params: {
       attempts,
       attempt: i + 1,
       total: candidates.length,
+      transientRetryAttempt: 0,
     });
     if ("success" in attemptRun) {
       return attemptRun.success;
