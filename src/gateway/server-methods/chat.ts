@@ -794,6 +794,79 @@ function buildChatSendTranscriptMessage(params: {
   };
 }
 
+function transcriptHasUserTurn(transcriptPath: string, message: string): boolean {
+  try {
+    const branch = SessionManager.open(transcriptPath).getBranch();
+    return branch.some(
+      (entry) =>
+        entry.type === "message" &&
+        entry.message.role === "user" &&
+        extractTranscriptUserText((entry.message as { content?: unknown }).content) === message,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function appendUserTranscriptMessage(params: {
+  message: string;
+  savedImages: SavedMedia[];
+  timestamp: number;
+  sessionId: string;
+  storePath: string | undefined;
+  sessionFile?: string;
+  agentId?: string;
+  createIfMissing?: boolean;
+}): TranscriptAppendResult {
+  const transcriptPath = resolveTranscriptPath({
+    sessionId: params.sessionId,
+    storePath: params.storePath,
+    sessionFile: params.sessionFile,
+    agentId: params.agentId,
+  });
+  if (!transcriptPath) {
+    return { ok: false, error: "transcript path not resolved" };
+  }
+
+  if (!fs.existsSync(transcriptPath)) {
+    if (!params.createIfMissing) {
+      return { ok: false, error: "transcript file not found" };
+    }
+    const ensured = ensureTranscriptFile({
+      transcriptPath,
+      sessionId: params.sessionId,
+    });
+    if (!ensured.ok) {
+      return { ok: false, error: ensured.error ?? "failed to create transcript file" };
+    }
+  }
+
+  if (transcriptHasUserTurn(transcriptPath, params.message)) {
+    return { ok: true };
+  }
+
+  try {
+    const sessionManager = SessionManager.open(transcriptPath);
+    const message = buildChatSendTranscriptMessage({
+      message: params.message,
+      savedImages: params.savedImages,
+      timestamp: params.timestamp,
+    });
+    const messageId = sessionManager.appendMessage(message);
+    // Pi buffers user-only turns until an assistant entry arrives. chat.send must
+    // survive reconnects before that path runs, so force the SessionManager's
+    // tree-shaped entries to disk without raw JSONL writes.
+    (
+      sessionManager as unknown as {
+        _rewriteFile?: () => void;
+      }
+    )._rewriteFile?.();
+    return { ok: true, messageId, message };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 function stripTrailingOffloadedMediaMarkers(message: string, refs: OffloadedRef[]): string {
   if (refs.length === 0) {
     return message;
@@ -2073,6 +2146,36 @@ export const chatHandlers: GatewayRequestHandlers = {
         explicitOriginTargetsPlugin && parsedImages.length > 0
           ? resolveChatSendTranscriptMediaFields(await persistedImagesPromise)
           : {};
+      let userTranscriptPersistPromise: Promise<void> | null = null;
+      const persistUserTranscriptMessage = async () => {
+        if (userTranscriptPersistPromise) {
+          await userTranscriptPersistPromise;
+          return;
+        }
+        userTranscriptPersistPromise = (async () => {
+          const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(sessionKey);
+          const resolvedSessionId = latestEntry?.sessionId ?? entry?.sessionId;
+          if (!resolvedSessionId) {
+            return;
+          }
+          const appended = appendUserTranscriptMessage({
+            sessionId: resolvedSessionId,
+            storePath: latestStorePath,
+            sessionFile: latestEntry?.sessionFile ?? entry?.sessionFile,
+            agentId,
+            message: parsedMessage,
+            savedImages: await persistedImagesPromise,
+            timestamp: now,
+            createIfMissing: true,
+          });
+          if (!appended.ok) {
+            context.logGateway.warn(
+              `webchat user transcript append failed: ${appended.error ?? "unknown error"}`,
+            );
+          }
+        })();
+        await userTranscriptPersistPromise;
+      };
 
       const trimmedMessage = parsedMessage.trim();
       const injectThinking = Boolean(
@@ -2352,6 +2455,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       })
         .then(async () => {
+          await persistUserTranscriptMessage();
           await rewriteUserTranscriptMedia();
           if (!agentRunStarted) {
             await emitUserTranscriptUpdate();
@@ -2530,7 +2634,12 @@ export const chatHandlers: GatewayRequestHandlers = {
             },
           });
         })
-        .catch((err) => {
+        .catch(async (err) => {
+          await persistUserTranscriptMessage().catch((persistErr) => {
+            context.logGateway.warn(
+              `webchat user transcript append failed after error: ${formatForLog(persistErr)}`,
+            );
+          });
           void rewriteUserTranscriptMedia().catch((rewriteErr) => {
             context.logGateway.warn(
               `webchat transcript media rewrite failed after error: ${formatForLog(rewriteErr)}`,

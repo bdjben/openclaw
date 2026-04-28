@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
+import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelCatalogEntry } from "../../agents/model-catalog.types.js";
 import type { MsgContext } from "../../auto-reply/templating.js";
@@ -344,6 +344,22 @@ function extractFirstTextBlock(payload: unknown): string | undefined {
   }
   const firstText = (first as { text?: unknown }).text;
   return typeof firstText === "string" ? firstText : undefined;
+}
+
+function readTranscriptMessages(): unknown[] {
+  return SessionManager.open(mockState.transcriptPath)
+    .getBranch()
+    .filter((entry) => entry.type === "message")
+    .map((entry) => (entry.type === "message" ? entry.message : undefined))
+    .filter((message): message is NonNullable<typeof message> => message !== undefined);
+}
+
+function flushSessionManager(manager: SessionManager) {
+  (
+    manager as unknown as {
+      _rewriteFile?: () => void;
+    }
+  )._rewriteFile?.();
 }
 
 function createScopedCliClient(
@@ -1893,6 +1909,12 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
         timestamp: expect.any(Number),
       },
     });
+    expect(readTranscriptMessages()).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: "hello from dashboard",
+      }),
+    ]);
     const finalBroadcast = (
       context.broadcast as unknown as ReturnType<typeof vi.fn>
     ).mock.calls.find((call) => call[0] === "chat" && call[1]?.state === "final")?.[1];
@@ -3065,6 +3087,15 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
         timestamp: expect.any(Number),
       },
     });
+    expect(readTranscriptMessages()).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: "quick command",
+      }),
+      expect.objectContaining({
+        role: "assistant",
+      }),
+    ]);
   });
 
   it("emits a user transcript update when chat.send fails before an agent run starts", async () => {
@@ -3098,6 +3129,44 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
           timestamp: expect.any(Number),
         },
       });
+      expect(readTranscriptMessages()).toEqual([
+        expect.objectContaining({
+          role: "user",
+          content: "hello from failed dispatch",
+        }),
+      ]);
     });
+  });
+
+  it("does not duplicate a user turn that the agent already persisted", async () => {
+    createTranscriptFixture("openclaw-chat-send-user-transcript-dedupe-");
+    const manager = SessionManager.open(mockState.transcriptPath);
+    manager.appendMessage({
+      role: "user",
+      content: "already persisted",
+      timestamp: 1,
+    });
+    flushSessionManager(manager);
+    mockState.finalText = "ok";
+    mockState.triggerAgentRunStart = true;
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-user-transcript-dedupe",
+      message: "already persisted",
+      expectBroadcast: false,
+    });
+
+    const userMessages = readTranscriptMessages().filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as { role?: unknown; content?: unknown }).role === "user" &&
+        (message as { content?: unknown }).content === "already persisted",
+    );
+    expect(userMessages).toHaveLength(1);
   });
 });
