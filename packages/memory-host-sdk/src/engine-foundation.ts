@@ -27,5 +27,6 @@ export {
   SILENT_REPLY_TOKEN,
   getMemoryHostServices,
   setMemoryHostServices,
+  withMemoryHostServices,
   type MemoryHostServices,
 } from "./host/services.js";

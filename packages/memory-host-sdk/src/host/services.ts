@@ -81,8 +81,29 @@ export type MemoryHostServices = {
 
 let activeServices: MemoryHostServices | undefined;
 
-export function setMemoryHostServices(services: MemoryHostServices): void {
+export function setMemoryHostServices(services: MemoryHostServices): () => void {
+  const previousServices = activeServices;
   activeServices = services;
+  let restored = false;
+  return () => {
+    if (restored) {
+      return;
+    }
+    restored = true;
+    activeServices = previousServices;
+  };
+}
+
+export async function withMemoryHostServices<T>(
+  services: MemoryHostServices,
+  run: () => T | Promise<T>,
+): Promise<Awaited<T>> {
+  const restore = setMemoryHostServices(services);
+  try {
+    return await run();
+  } finally {
+    restore();
+  }
 }
 
 export function getMemoryHostServices(): MemoryHostServices {
@@ -108,7 +129,7 @@ export function createDefaultMemoryHostServices(): MemoryHostServices {
       createSubsystemLogger: () => ({ debug: () => {} }),
       detectMime: async ({ filePath }) => mimeTypeFromFilePath(filePath),
       estimateStringChars,
-      redactSensitiveText: (text) => text,
+      redactSensitiveText,
       runTasksWithConcurrency,
     },
     memory: {
@@ -117,9 +138,10 @@ export function createDefaultMemoryHostServices(): MemoryHostServices {
     },
     network: {
       buildRemoteBaseUrlPolicy,
-      async fetchWithSsrFGuard(params) {
-        const response = await (params.fetchImpl ?? fetch)(params.url, params.init);
-        return { response, release: async () => {} };
+      async fetchWithSsrFGuard() {
+        throw new Error(
+          "@openclaw/memory-host-sdk network.fetchWithSsrFGuard requires a host service binding",
+        );
       },
       shouldUseEnvHttpProxyForUrl: () => false,
     },
@@ -327,6 +349,19 @@ function hasInterSessionUserProvenance(
 }
 
 const LEADING_TIMESTAMP_PREFIX_RE = /^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\] */;
+const INTERNAL_RUNTIME_CONTEXT_BEGIN = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>";
+const INTERNAL_RUNTIME_CONTEXT_END = "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>";
+const OPENCLAW_RUNTIME_CONTEXT_NOTICE =
+  "This context is runtime-generated, not user-authored. Keep internal details private.";
+const OPENCLAW_NEXT_TURN_RUNTIME_CONTEXT_HEADER =
+  "OpenClaw runtime context for the immediately preceding user message.";
+const OPENCLAW_RUNTIME_EVENT_HEADER = "OpenClaw runtime event.";
+const LEGACY_INTERNAL_CONTEXT_HEADER =
+  ["OpenClaw runtime context (internal):", OPENCLAW_RUNTIME_CONTEXT_NOTICE, ""].join("\n") + "\n";
+const LEGACY_INTERNAL_EVENT_MARKER = "[Internal task completion event]";
+const LEGACY_INTERNAL_EVENT_SEPARATOR = "\n\n---\n\n";
+const LEGACY_UNTRUSTED_RESULT_BEGIN = "<<<BEGIN_UNTRUSTED_CHILD_RESULT>>>";
+const LEGACY_UNTRUSTED_RESULT_END = "<<<END_UNTRUSTED_CHILD_RESULT>>>";
 const INBOUND_META_SENTINELS = [
   "Conversation info (untrusted metadata):",
   "Sender (untrusted metadata):",
@@ -376,8 +411,182 @@ function stripInboundMetadata(text: string): string {
   return result.join("\n").replace(/^\n+/, "").replace(/\n+$/, "");
 }
 
+function findDelimitedTokenIndex(text: string, token: string, from: number): number {
+  const tokenRe = new RegExp(`(?:^|\\r?\\n)${escapeRegExp(token)}(?=\\r?\\n|$)`, "g");
+  tokenRe.lastIndex = Math.max(0, from);
+  const match = tokenRe.exec(text);
+  if (!match) {
+    return -1;
+  }
+  const prefixLength = match[0].length - token.length;
+  return match.index + prefixLength;
+}
+
+function stripDelimitedBlock(text: string, begin: string, end: string): string {
+  let next = text;
+  for (;;) {
+    const start = findDelimitedTokenIndex(next, begin, 0);
+    if (start === -1) {
+      return next;
+    }
+
+    let cursor = start + begin.length;
+    let depth = 1;
+    let finish = -1;
+    while (depth > 0) {
+      const nextBegin = findDelimitedTokenIndex(next, begin, cursor);
+      const nextEnd = findDelimitedTokenIndex(next, end, cursor);
+      if (nextEnd === -1) {
+        break;
+      }
+      if (nextBegin !== -1 && nextBegin < nextEnd) {
+        depth += 1;
+        cursor = nextBegin + begin.length;
+        continue;
+      }
+      depth -= 1;
+      finish = nextEnd;
+      cursor = nextEnd + end.length;
+    }
+
+    const before = next.slice(0, start).trimEnd();
+    if (finish === -1 || depth !== 0) {
+      return before;
+    }
+    const after = next.slice(finish + end.length).trimStart();
+    next = before && after ? `${before}\n\n${after}` : `${before}${after}`;
+  }
+}
+
+function findLegacyInternalEventEnd(text: string, start: number): number | null {
+  if (!text.startsWith(LEGACY_INTERNAL_EVENT_MARKER, start)) {
+    return null;
+  }
+
+  const resultBegin = text.indexOf(
+    LEGACY_UNTRUSTED_RESULT_BEGIN,
+    start + LEGACY_INTERNAL_EVENT_MARKER.length,
+  );
+  if (resultBegin === -1) {
+    return null;
+  }
+
+  const resultEnd = text.indexOf(
+    LEGACY_UNTRUSTED_RESULT_END,
+    resultBegin + LEGACY_UNTRUSTED_RESULT_BEGIN.length,
+  );
+  if (resultEnd === -1) {
+    return null;
+  }
+
+  const actionIndex = text.indexOf("\n\nAction:\n", resultEnd + LEGACY_UNTRUSTED_RESULT_END.length);
+  if (actionIndex === -1) {
+    return null;
+  }
+
+  const afterAction = actionIndex + "\n\nAction:\n".length;
+  const nextEvent = text.indexOf(
+    `${LEGACY_INTERNAL_EVENT_SEPARATOR}${LEGACY_INTERNAL_EVENT_MARKER}`,
+    afterAction,
+  );
+  if (nextEvent !== -1) {
+    return nextEvent;
+  }
+
+  const nextParagraph = text.indexOf("\n\n", afterAction);
+  return nextParagraph === -1 ? text.length : nextParagraph;
+}
+
+function stripLegacyInternalRuntimeContext(text: string): string {
+  let next = text;
+  let searchFrom = 0;
+  for (;;) {
+    const headerStart = next.indexOf(LEGACY_INTERNAL_CONTEXT_HEADER, searchFrom);
+    if (headerStart === -1) {
+      return next;
+    }
+
+    const eventStart = headerStart + LEGACY_INTERNAL_CONTEXT_HEADER.length;
+    if (!next.startsWith(LEGACY_INTERNAL_EVENT_MARKER, eventStart)) {
+      searchFrom = eventStart;
+      continue;
+    }
+
+    let blockEnd = findLegacyInternalEventEnd(next, eventStart);
+    if (blockEnd == null) {
+      const nextParagraph = next.indexOf("\n\n", eventStart + LEGACY_INTERNAL_EVENT_MARKER.length);
+      blockEnd = nextParagraph === -1 ? next.length : nextParagraph;
+    } else {
+      while (
+        next.startsWith(
+          `${LEGACY_INTERNAL_EVENT_SEPARATOR}${LEGACY_INTERNAL_EVENT_MARKER}`,
+          blockEnd,
+        )
+      ) {
+        const nextEventStart = blockEnd + LEGACY_INTERNAL_EVENT_SEPARATOR.length;
+        const nextEventEnd = findLegacyInternalEventEnd(next, nextEventStart);
+        if (nextEventEnd == null) {
+          break;
+        }
+        blockEnd = nextEventEnd;
+      }
+    }
+
+    const before = next.slice(0, headerStart).trimEnd();
+    const after = next.slice(blockEnd).trimStart();
+    next = before && after ? `${before}\n\n${after}` : `${before}${after}`;
+    searchFrom = Math.max(0, before.length - 1);
+  }
+}
+
+function isRuntimeContextPromptHeader(line: string): boolean {
+  return (
+    line === OPENCLAW_NEXT_TURN_RUNTIME_CONTEXT_HEADER || line === OPENCLAW_RUNTIME_EVENT_HEADER
+  );
+}
+
+function stripRuntimeContextPromptPreface(text: string): string {
+  const lines = text.split(/\r?\n/);
+  let changed = false;
+  const output: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const nextLine = lines[index + 1] ?? "";
+    if (
+      isRuntimeContextPromptHeader(line.trim()) &&
+      nextLine.trim() === OPENCLAW_RUNTIME_CONTEXT_NOTICE
+    ) {
+      changed = true;
+      index += 1;
+      while (index + 1 < lines.length && (lines[index + 1] ?? "").trim() === "") {
+        index += 1;
+      }
+      continue;
+    }
+    output.push(line);
+  }
+
+  return changed
+    ? output
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+    : text;
+}
+
 function stripInternalRuntimeContext(text: string): string {
-  return text;
+  if (!text) {
+    return text;
+  }
+  const withoutDelimitedBlocks = stripDelimitedBlock(
+    text,
+    INTERNAL_RUNTIME_CONTEXT_BEGIN,
+    INTERNAL_RUNTIME_CONTEXT_END,
+  );
+  return stripRuntimeContextPromptPreface(
+    stripLegacyInternalRuntimeContext(withoutDelimitedBlocks),
+  );
 }
 
 function buildRemoteBaseUrlPolicy(baseUrl: string): SsrFPolicy | undefined {
@@ -441,6 +650,62 @@ function mimeTypeFromFilePath(filePath?: string): string | undefined {
     ".webp": "image/webp",
   };
   return byExt[ext];
+}
+
+const SECRET_PATTERNS: RegExp[] = [
+  /\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)\b\s*[=:]\s*(["']?)([^\s"'\\]+)\1/g,
+  /[?&](?:access[-_]?token|auth[-_]?token|hook[-_]?token|refresh[-_]?token|api[-_]?key|client[-_]?secret|token|key|secret|password|pass|passwd|auth|signature)=([^&\s"'<>]+)/gi,
+  /"(?:apiKey|token|secret|password|passwd|accessToken|refreshToken)"\s*:\s*"([^"]+)"/g,
+  /--(?:api[-_]?key|hook[-_]?token|token|secret|password|passwd)\s+(["']?)([^\s"']+)\1/g,
+  /Authorization\s*[:=]\s*Bearer\s+([A-Za-z0-9._\-+=]+)/g,
+  /\bBearer\s+([A-Za-z0-9._\-+=]{18,})\b/g,
+  /(^|[\s,;])(?:access_token|refresh_token|api[-_]?key|token|secret|password|passwd)=([^\s&#]+)/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /\b(sk-[A-Za-z0-9_-]{8,})\b/g,
+  /\b(ghp_[A-Za-z0-9]{20,})\b/g,
+  /\b(github_pat_[A-Za-z0-9_]{20,})\b/g,
+  /\b(xox[baprs]-[A-Za-z0-9-]{10,})\b/g,
+  /\b(xapp-[A-Za-z0-9-]{10,})\b/g,
+  /\b(gsk_[A-Za-z0-9_-]{10,})\b/g,
+  /\b(AIza[0-9A-Za-z\-_]{20,})\b/g,
+  /\b(pplx-[A-Za-z0-9_-]{10,})\b/g,
+  /\b(npm_[A-Za-z0-9]{10,})\b/g,
+  /\bbot(\d{6,}:[A-Za-z0-9_-]{20,})\b/g,
+  /\b(\d{6,}:[A-Za-z0-9_-]{20,})\b/g,
+];
+
+function maskToken(token: string): string {
+  if (token.length < 18) {
+    return "***";
+  }
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+function redactPemBlock(block: string): string {
+  const lines = block.split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) {
+    return "***";
+  }
+  return `${lines[0]}\n...redacted...\n${lines[lines.length - 1]}`;
+}
+
+function redactMatch(match: string, groups: string[]): string {
+  if (match.includes("PRIVATE KEY-----")) {
+    return redactPemBlock(match);
+  }
+  const token = groups.findLast((value) => typeof value === "string" && value.length > 0) ?? match;
+  const masked = maskToken(token);
+  return token === match ? masked : match.replace(token, masked);
+}
+
+function redactSensitiveText(text: string): string {
+  let next = text;
+  for (const pattern of SECRET_PATTERNS) {
+    next = next.replace(pattern, (...args: string[]) =>
+      redactMatch(args[0] ?? "", args.slice(1, -2)),
+    );
+  }
+  return next;
 }
 
 function escapeRegExp(value: string): string {
