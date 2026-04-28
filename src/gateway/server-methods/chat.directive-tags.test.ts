@@ -3141,11 +3141,13 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
   it("does not duplicate a user turn that the agent already persisted", async () => {
     createTranscriptFixture("openclaw-chat-send-user-transcript-dedupe-");
     const manager = SessionManager.open(mockState.transcriptPath);
-    manager.appendMessage({
+    const persistedUserMessage = {
       role: "user",
       content: "already persisted",
       timestamp: 1,
-    });
+      idempotencyKey: "idem-user-transcript-dedupe",
+    } as Parameters<SessionManager["appendMessage"]>[0] & { idempotencyKey: string };
+    manager.appendMessage(persistedUserMessage);
     flushSessionManager(manager);
     mockState.finalText = "ok";
     mockState.triggerAgentRunStart = true;
@@ -3168,5 +3170,40 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
         (message as { content?: unknown }).content === "already persisted",
     );
     expect(userMessages).toHaveLength(1);
+  });
+
+  it("persists separate chat.send turns with identical user text", async () => {
+    createTranscriptFixture("openclaw-chat-send-user-transcript-repeated-text-");
+    mockState.finalText = "ok";
+    mockState.triggerAgentRunStart = true;
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-user-transcript-repeat-1",
+      message: "continue",
+      expectBroadcast: false,
+    });
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-user-transcript-repeat-2",
+      message: "continue",
+      expectBroadcast: false,
+    });
+
+    const userMessages = readTranscriptMessages().filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        (message as { role?: unknown; content?: unknown }).role === "user" &&
+        (message as { content?: unknown }).content === "continue",
+    );
+    expect(userMessages).toEqual([
+      expect.objectContaining({ idempotencyKey: "idem-user-transcript-repeat-1" }),
+      expect.objectContaining({ idempotencyKey: "idem-user-transcript-repeat-2" }),
+    ]);
   });
 });

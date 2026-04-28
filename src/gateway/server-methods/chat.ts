@@ -784,25 +784,55 @@ function buildChatSendTranscriptMessage(params: {
   message: string;
   savedImages: SavedMedia[];
   timestamp: number;
+  idempotencyKey?: string;
 }) {
   const mediaFields = resolveChatSendTranscriptMediaFields(params.savedImages);
   return {
     role: "user" as const,
     content: params.message,
     timestamp: params.timestamp,
+    ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
     ...mediaFields,
   };
 }
 
-function transcriptHasUserTurn(transcriptPath: string, message: string): boolean {
+function resolveTranscriptLeafId(transcriptPath: string): string | null | undefined {
   try {
-    const branch = SessionManager.open(transcriptPath).getBranch();
-    return branch.some(
-      (entry) =>
-        entry.type === "message" &&
-        entry.message.role === "user" &&
-        extractTranscriptUserText((entry.message as { content?: unknown }).content) === message,
-    );
+    if (!fs.existsSync(transcriptPath)) {
+      return null;
+    }
+    return SessionManager.open(transcriptPath).getLeafId();
+  } catch {
+    return undefined;
+  }
+}
+
+function transcriptHasUserTurnAfterEntry(params: {
+  transcriptPath: string;
+  afterEntryId: string | null | undefined;
+  message: string;
+}): boolean {
+  if (params.afterEntryId === undefined) {
+    return false;
+  }
+  try {
+    const branch = SessionManager.open(params.transcriptPath).getBranch();
+    const startIndex =
+      params.afterEntryId === null
+        ? -1
+        : branch.findIndex((entry) => entry.id === params.afterEntryId);
+    if (params.afterEntryId !== null && startIndex < 0) {
+      return false;
+    }
+    return branch
+      .slice(startIndex + 1)
+      .some(
+        (entry) =>
+          entry.type === "message" &&
+          entry.message.role === "user" &&
+          extractTranscriptUserText((entry.message as { content?: unknown }).content) ===
+            params.message,
+      );
   } catch {
     return false;
   }
@@ -817,6 +847,8 @@ function appendUserTranscriptMessage(params: {
   sessionFile?: string;
   agentId?: string;
   createIfMissing?: boolean;
+  idempotencyKey?: string;
+  dedupeAfterEntryId?: string | null;
 }): TranscriptAppendResult {
   const transcriptPath = resolveTranscriptPath({
     sessionId: params.sessionId,
@@ -841,7 +873,14 @@ function appendUserTranscriptMessage(params: {
     }
   }
 
-  if (transcriptHasUserTurn(transcriptPath, params.message)) {
+  if (
+    (params.idempotencyKey && transcriptHasIdempotencyKey(transcriptPath, params.idempotencyKey)) ||
+    transcriptHasUserTurnAfterEntry({
+      transcriptPath,
+      afterEntryId: params.dedupeAfterEntryId,
+      message: params.message,
+    })
+  ) {
     return { ok: true };
   }
 
@@ -851,6 +890,7 @@ function appendUserTranscriptMessage(params: {
       message: params.message,
       savedImages: params.savedImages,
       timestamp: params.timestamp,
+      idempotencyKey: params.idempotencyKey,
     });
     const messageId = sessionManager.appendMessage(message);
     // Pi buffers user-only turns until an assistant entry arrives. chat.send must
@@ -2135,6 +2175,20 @@ export const chatHandlers: GatewayRequestHandlers = {
         status: "started" as const,
       };
       respond(true, ackPayload, undefined, { runId: clientRunId });
+      const transcriptAppendAfterEntryId = (() => {
+        const { storePath: latestStorePath, entry: latestEntry } = loadSessionEntry(sessionKey);
+        const resolvedSessionId = latestEntry?.sessionId ?? entry?.sessionId;
+        if (!resolvedSessionId) {
+          return undefined;
+        }
+        const transcriptPath = resolveTranscriptPath({
+          sessionId: resolvedSessionId,
+          storePath: latestStorePath,
+          sessionFile: latestEntry?.sessionFile ?? entry?.sessionFile,
+          agentId,
+        });
+        return transcriptPath ? resolveTranscriptLeafId(transcriptPath) : undefined;
+      })();
       const persistedImagesPromise = persistChatSendImages({
         images: parsedImages,
         imageOrder,
@@ -2167,6 +2221,8 @@ export const chatHandlers: GatewayRequestHandlers = {
             savedImages: await persistedImagesPromise,
             timestamp: now,
             createIfMissing: true,
+            idempotencyKey: clientRunId,
+            dedupeAfterEntryId: transcriptAppendAfterEntryId,
           });
           if (!appended.ok) {
             context.logGateway.warn(
@@ -2280,6 +2336,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               message: parsedMessage,
               savedImages: persistedImages,
               timestamp: now,
+              idempotencyKey: clientRunId,
             }),
           });
         })();
