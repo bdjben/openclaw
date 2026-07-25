@@ -598,7 +598,7 @@ describe("matrix client storage paths", () => {
     },
   );
 
-  it("prefers claimed current-token state over an empty new-token metadata root", () => {
+  it("scans for and prefers claimed current-token state over an unclaimed canonical root", () => {
     const stateDir = setupStateDir();
     const oldStoragePaths = seedCanonicalStorageRoot({
       stateDir,
@@ -624,6 +624,7 @@ describe("matrix client storage paths", () => {
       },
     });
 
+    const readdirSync = vi.spyOn(fs, "readdirSync");
     const rotatedStoragePaths = resolveDefaultStoragePaths({
       accessToken: "secret-token-new",
       deviceId: "DEVICE123",
@@ -631,6 +632,7 @@ describe("matrix client storage paths", () => {
 
     expect(rotatedStoragePaths.rootDir).toBe(oldStoragePaths.rootDir);
     expect(rotatedStoragePaths.tokenHash).toBe(oldStoragePaths.tokenHash);
+    expect(readdirSync).toHaveBeenCalledOnce();
   });
 
   it("does not reuse a populated older token-hash root while deviceId is unknown", () => {
