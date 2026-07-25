@@ -370,6 +370,37 @@ function createEnv(stateDir: string): NodeJS.ProcessEnv {
   };
 }
 
+function createUnsafeIndexDrift(databasePath: string): void {
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.exec(`
+      CREATE TABLE unsafe_index_records (
+        id INTEGER PRIMARY KEY,
+        indexed_value TEXT NOT NULL,
+        alternate_value TEXT NOT NULL
+      );
+      CREATE INDEX unsafe_index_records_value ON unsafe_index_records(indexed_value);
+      INSERT INTO unsafe_index_records (indexed_value, alternate_value)
+      VALUES ('alpha', 'zeta'), ('beta', 'eta'), ('gamma', 'theta');
+    `);
+    database.enableDefensive?.(false);
+    database.exec("PRAGMA writable_schema = ON;");
+    database
+      .prepare(
+        "UPDATE sqlite_schema SET sql = 'CREATE INDEX unsafe_index_records_value ON unsafe_index_records(alternate_value)' WHERE name = 'unsafe_index_records_value'",
+      )
+      .run();
+    const schemaVersion = database.prepare("PRAGMA schema_version").get() as {
+      schema_version: number;
+    };
+    database.exec(
+      `PRAGMA writable_schema = OFF; PRAGMA schema_version = ${schemaVersion.schema_version + 1};`,
+    );
+  } finally {
+    database.close();
+  }
+}
+
 async function createLegacyAuditLedger(stateDir: string): Promise<string> {
   const databasePath = path.join(stateDir, "state", "openclaw.sqlite");
   await fs.mkdir(path.dirname(databasePath), { recursive: true });
@@ -634,22 +665,133 @@ describe("state migrations", () => {
     expect(migrateLegacyState).toHaveBeenCalledOnce();
   });
 
-  it("does not let scoped automatic preflight satisfy a later full pass", async () => {
+  it("escalates scoped schema preflight without rerunning legacy migration detection", async () => {
     const root = await createTempDir();
     const stateDir = path.join(root, ".openclaw");
     const env = createEnv(stateDir);
     const cfg = createConfig();
+    const detectLegacyState = vi.fn(() => null);
+    pluginDoctorStateMigrationEntries.entries = [
+      {
+        pluginId: "memory-core",
+        migration: {
+          id: "memory-core-schema-preflight-latch-test",
+          label: "Memory Core schema preflight latch test",
+          detectLegacyState,
+          migrateLegacyState: () => ({ changes: [], warnings: [] }),
+        },
+      },
+    ];
+    openOpenClawStateDatabase({ env });
+    closeOpenClawStateDatabaseForTest();
 
+    await autoMigrateLegacyState({
+      cfg,
+      env,
+      homedir: () => root,
+      allowCurrentStateSchemaFastPath: true,
+    });
+    expect(detectLegacyState).toHaveBeenCalledOnce();
+
+    closeOpenClawStateDatabaseForTest();
+    const databasePath = path.join(stateDir, "state", "openclaw.sqlite");
+    createUnsafeIndexDrift(databasePath);
+
+    const full = await autoMigrateLegacyState({ cfg, env, homedir: () => root });
+
+    expect(full.warnings).toEqual([
+      expect.stringMatching(
+        /integrity_check failed.*missing from index unsafe_index_records_value/iu,
+      ),
+    ]);
+    expect(detectLegacyState).toHaveBeenCalledOnce();
+  });
+
+  it("replays a failed full schema preflight to later scoped requests", async () => {
+    const root = await createTempDir();
+    const stateDir = path.join(root, ".openclaw");
+    const env = createEnv(stateDir);
+    const cfg = createConfig();
+    const databasePath = openOpenClawStateDatabase({ env }).path;
+    closeOpenClawStateDatabaseForTest();
+    createUnsafeIndexDrift(databasePath);
+
+    const full = await autoMigrateLegacyState({ cfg, env, homedir: () => root });
     const scoped = await autoMigrateLegacyState({
       cfg,
       env,
       homedir: () => root,
       allowCurrentStateSchemaFastPath: true,
     });
-    const full = await autoMigrateLegacyState({ cfg, env, homedir: () => root });
 
+    expect(full.warnings).toEqual([
+      expect.stringMatching(
+        /integrity_check failed.*missing from index unsafe_index_records_value/iu,
+      ),
+    ]);
+    expect(scoped.warnings).toEqual(full.warnings);
     expect(scoped.skipped).toBe(false);
-    expect(full.skipped).toBe(false);
+  });
+
+  it("checks schema preflight independently for each migration mode", async () => {
+    const root = await createTempDir();
+    const stateDir = path.join(root, ".openclaw");
+    const env = createEnv(stateDir);
+    const cfg = createConfig();
+    const databasePath = openOpenClawStateDatabase({ env }).path;
+    closeOpenClawStateDatabaseForTest();
+
+    await autoMigrateLegacyState({ cfg, env, homedir: () => root });
+    closeOpenClawStateDatabaseForTest();
+    createUnsafeIndexDrift(databasePath);
+
+    const doctorRepair = await autoMigrateLegacyState({
+      cfg,
+      env,
+      homedir: () => root,
+      doctorOnlyStateMigrations: true,
+    });
+
+    expect(doctorRepair.warnings).toEqual([
+      expect.stringMatching(
+        /integrity_check failed.*missing from index unsafe_index_records_value/iu,
+      ),
+    ]);
+  });
+
+  it("lets a full schema preflight satisfy a later scoped request", async () => {
+    const root = await createTempDir();
+    const stateDir = path.join(root, ".openclaw");
+    const env = createEnv(stateDir);
+    const cfg = createConfig();
+    const detectLegacyState = vi.fn(() => null);
+    pluginDoctorStateMigrationEntries.entries = [
+      {
+        pluginId: "memory-core",
+        migration: {
+          id: "memory-core-full-schema-preflight-latch-test",
+          label: "Memory Core full schema preflight latch test",
+          detectLegacyState,
+          migrateLegacyState: () => ({ changes: [], warnings: [] }),
+        },
+      },
+    ];
+
+    await autoMigrateLegacyState({ cfg, env, homedir: () => root });
+    const scoped = await autoMigrateLegacyState({
+      cfg,
+      env,
+      homedir: () => root,
+      allowCurrentStateSchemaFastPath: true,
+    });
+
+    expect(scoped).toEqual({
+      migrated: false,
+      skipped: true,
+      changes: [],
+      warnings: [],
+    });
+    expect(detectLegacyState).toHaveBeenCalledOnce();
   });
 
   it("checks automatic migrations independently for each state directory", async () => {

@@ -171,13 +171,21 @@ function describeStateSchemaMigration(migration: OpenClawStateDatabaseSchemaMigr
   return migration.kind satisfies never;
 }
 
+type StateSchemaPreflightMode = "scoped" | "full";
+type StateSchemaPreflightResult = { changes: string[]; warnings: string[] };
+type StateSchemaPreflightCacheEntry =
+  | { status: "completed"; mode: StateSchemaPreflightMode }
+  | { status: "failed"; mode: StateSchemaPreflightMode; result: StateSchemaPreflightResult };
+
 const autoMigrateChecked = new Set<string>();
+const autoMigrateStateSchemaCache = new Map<string, StateSchemaPreflightCacheEntry>();
 
 const PLUGIN_DOCTOR_MIGRATION_LOCK_TIMEOUT_MS = 250;
 const PLUGIN_DOCTOR_MIGRATION_LOCK_POLL_INTERVAL_MS = 25;
 
 export function resetAutoMigrateLegacyStateForTest(): void {
   autoMigrateChecked.clear();
+  autoMigrateStateSchemaCache.clear();
   resetAutoMigrateLegacyTaskStateSidecarsForTest();
   resetLegacySessionSurfacesForTest();
 }
@@ -1212,25 +1220,53 @@ export async function autoMigrateLegacyState(params: {
   const env = params.env ?? process.env;
   const homedir = params.homedir ?? os.homedir;
   const migrationMode = params.doctorOnlyStateMigrations === true ? "doctor-repair" : "automatic";
-  const schemaPreflightMode = params.allowCurrentStateSchemaFastPath ? "scoped" : "full";
   const initialStateDir = resolveStateDir(env, homedir);
-  const checkKey = `${path.resolve(initialStateDir)}\0${migrationMode}\0${schemaPreflightMode}`;
-  if (autoMigrateChecked.has(checkKey)) {
-    return { migrated: false, skipped: true, changes: [], warnings: [] };
+  const checkKey = `${path.resolve(initialStateDir)}\0${migrationMode}`;
+  const migrationAlreadyChecked = autoMigrateChecked.has(checkKey);
+  if (!migrationAlreadyChecked) {
+    autoMigrateChecked.add(checkKey);
   }
-  autoMigrateChecked.add(checkKey);
 
-  const stateDirResult = await autoMigrateLegacyStateDir({
-    env,
-    homedir,
-    log: params.log,
-  });
+  const stateDirResult = migrationAlreadyChecked
+    ? { migrated: false, skipped: true, changes: [], warnings: [] }
+    : await autoMigrateLegacyStateDir({
+        env,
+        homedir,
+        log: params.log,
+      });
   const stateDir = resolveStateDir(env, homedir);
-  autoMigrateChecked.add(`${path.resolve(stateDir)}\0${migrationMode}\0${schemaPreflightMode}`);
-  const stateSchema = repairOpenClawStateDatabaseSchema({
-    env: { ...env, OPENCLAW_STATE_DIR: stateDir },
-    allowCurrentSchemaFastPath: params.allowCurrentStateSchemaFastPath,
-  });
+  if (!migrationAlreadyChecked) {
+    autoMigrateChecked.add(`${path.resolve(stateDir)}\0${migrationMode}`);
+  }
+  const schemaPreflightMode = params.allowCurrentStateSchemaFastPath ? "scoped" : "full";
+  const stateSchemaKey = `${path.resolve(stateDir)}\0${migrationMode}`;
+  const cachedSchemaPreflight = autoMigrateStateSchemaCache.get(stateSchemaKey);
+  const schemaAlreadyChecked =
+    cachedSchemaPreflight?.status === "completed" &&
+    (cachedSchemaPreflight.mode === "full" || cachedSchemaPreflight.mode === schemaPreflightMode);
+  const cachedSchemaFailure =
+    cachedSchemaPreflight?.status === "failed" &&
+    (cachedSchemaPreflight.mode === "full" || cachedSchemaPreflight.mode === schemaPreflightMode)
+      ? cachedSchemaPreflight.result
+      : undefined;
+  let stateSchema: StateSchemaPreflightResult = cachedSchemaFailure ?? {
+    changes: [],
+    warnings: [],
+  };
+  if (!schemaAlreadyChecked && !cachedSchemaFailure) {
+    // A full Doctor pass subsumes a scoped automatic pass, while scoped must
+    // never suppress a later full integrity check.
+    stateSchema = repairOpenClawStateDatabaseSchema({
+      env: { ...env, OPENCLAW_STATE_DIR: stateDir },
+      allowCurrentSchemaFastPath: params.allowCurrentStateSchemaFastPath,
+    });
+    autoMigrateStateSchemaCache.set(
+      stateSchemaKey,
+      stateSchema.warnings.length > 0
+        ? { status: "failed", mode: schemaPreflightMode, result: stateSchema }
+        : { status: "completed", mode: schemaPreflightMode },
+    );
+  }
   if (stateSchema.warnings.length > 0) {
     return {
       migrated: stateDirResult.migrated || stateSchema.changes.length > 0,
@@ -1238,6 +1274,20 @@ export async function autoMigrateLegacyState(params: {
       changes: [...stateDirResult.changes, ...stateSchema.changes],
       warnings: [...stateDirResult.warnings, ...stateSchema.warnings],
       ...(stateDirResult.notices?.length ? { notices: stateDirResult.notices } : {}),
+    };
+  }
+  if (migrationAlreadyChecked) {
+    if (stateSchema.changes.length > 0) {
+      const logger = params.log ?? createSubsystemLogger("state-migrations");
+      logger.info(
+        `Auto-migrated legacy state:\n${stateSchema.changes.map((entry) => `- ${entry}`).join("\n")}`,
+      );
+    }
+    return {
+      migrated: stateSchema.changes.length > 0,
+      skipped: schemaAlreadyChecked,
+      changes: stateSchema.changes,
+      warnings: [],
     };
   }
   const pluginDoctorConfig = params.pluginDoctorConfig ?? params.cfg;
