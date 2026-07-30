@@ -133,7 +133,7 @@ describe("analyzeBootstrapBudget", () => {
     expect(analysis.truncatedFiles[0]?.causes).toStrictEqual([]);
   });
 
-  it("accounts for the fixed USER.md budget", () => {
+  it("accounts for the default USER.md budget", () => {
     const analysis = analyzeBootstrapBudget({
       files: [
         {
@@ -151,31 +151,34 @@ describe("analyzeBootstrapBudget", () => {
 
     expect(analysis.truncatedFiles[0]?.causes).toContain("per-file-limit");
     const lines = buildBootstrapPromptWarning({ analysis, mode: "always" }).lines;
-    expect(lines).toContain("USER.md has a fixed 4000-character bootstrap cap; keep it compact.");
-    expect(lines.join("\n")).not.toContain("raise agents.defaults.bootstrapMaxChars");
+    expect(lines).toContain(
+      "USER.md uses its default 4000-character bootstrap limit; configure a higher bootstrapMaxChars to expand it.",
+    );
+    expect(lines.join("\n")).toContain("raise agents.defaults.bootstrapMaxChars");
   });
 
-  it("keeps USER.md advice accurate for lower per-file and exhausted total limits", () => {
-    const lowerPerFile = analyzeBootstrapBudget({
+  it("keeps USER.md advice accurate for configured and exhausted total limits", () => {
+    const configuredPerFile = analyzeBootstrapBudget({
       files: [
         {
           name: "USER.md",
           path: "/tmp/USER.md",
           missing: false,
-          rawChars: 3_000,
-          injectedChars: 2_000,
+          rawChars: 9_000,
+          injectedChars: 8_000,
           truncated: true,
         },
       ],
-      bootstrapMaxChars: 2_000,
+      bootstrapMaxChars: 20_000,
       bootstrapTotalMaxChars: 60_000,
+      userBootstrapMaxChars: 8_000,
     });
-    const lowerLines = buildBootstrapPromptWarning({
-      analysis: lowerPerFile,
+    const configuredLines = buildBootstrapPromptWarning({
+      analysis: configuredPerFile,
       mode: "always",
     }).lines;
-    expect(lowerLines.join("\n")).not.toContain("fixed 4000-character");
-    expect(lowerLines.join("\n")).toContain("raise agents.defaults.bootstrapMaxChars");
+    expect(configuredLines.join("\n")).not.toContain("default 4000-character");
+    expect(configuredLines.join("\n")).toContain("raise agents.defaults.bootstrapMaxChars");
 
     const exhaustedTotal = analyzeBootstrapBudget({
       files: [
@@ -204,7 +207,7 @@ describe("analyzeBootstrapBudget", () => {
       mode: "always",
     }).lines;
     expect(exhaustedTotal.truncatedFiles[0]?.causes).toContain("total-limit");
-    expect(exhaustedLines.join("\n")).toContain("fixed 4000-character");
+    expect(exhaustedLines.join("\n")).toContain("default 4000-character");
     expect(exhaustedLines.join("\n")).toContain("bootstrapTotalMaxChars");
 
     const laterExhaustion = analyzeBootstrapBudget({

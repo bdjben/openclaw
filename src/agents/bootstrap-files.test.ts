@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   clearInternalHooks,
   registerInternalHook,
@@ -400,6 +401,27 @@ describe("resolveBootstrapContextForRun", () => {
     );
 
     expect(extra?.content).toBe("extra");
+  });
+
+  it("honors an explicitly higher USER.md bootstrap limit", async () => {
+    const workspaceDir = await makeTempWorkspace("openclaw-bootstrap-");
+    const content = "u".repeat(10_000);
+    await fs.writeFile(path.join(workspaceDir, "USER.md"), content, "utf8");
+
+    const result = await resolveBootstrapContextForRun({
+      workspaceDir,
+      agentId: "main",
+      config: {
+        agents: {
+          defaults: { bootstrapMaxChars: 12_000 },
+          entries: { main: { default: true } },
+        },
+      } as OpenClawConfig,
+    });
+
+    expect(result.contextFiles.find((file) => file.path.endsWith("USER.md"))?.content).toBe(
+      content,
+    );
   });
 
   it("keeps BOOTSTRAP.md available in shared injected context for non-attempt consumers", async () => {

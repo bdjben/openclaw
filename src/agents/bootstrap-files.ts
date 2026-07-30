@@ -18,6 +18,7 @@ import {
   buildBootstrapContextFiles,
   resolveBootstrapMaxChars,
   resolveBootstrapTotalMaxChars,
+  resolveUserBootstrapMaxChars,
 } from "./embedded-agent-helpers.js";
 import {
   DEFAULT_BOOTSTRAP_FILENAME,
@@ -319,6 +320,7 @@ export function buildBootstrapContextForFiles(
   const contextFiles = buildBootstrapContextFiles(bootstrapFiles, {
     maxChars: resolveBootstrapMaxChars(params.config, params.agentId),
     totalMaxChars: resolveBootstrapTotalMaxChars(params.config, params.agentId),
+    userMaxChars: resolveUserBootstrapMaxChars(params.config, params.agentId),
     warn: params.warn,
   });
   return contextFiles;

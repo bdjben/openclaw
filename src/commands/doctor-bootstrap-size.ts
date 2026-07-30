@@ -13,6 +13,7 @@ import { resolveBootstrapContextForRun } from "../agents/bootstrap-files.js";
 import {
   resolveBootstrapMaxChars,
   resolveBootstrapTotalMaxChars,
+  resolveUserBootstrapMaxChars,
 } from "../agents/embedded-agent-helpers.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
@@ -51,6 +52,7 @@ export async function noteBootstrapFileSize(cfg: OpenClawConfig) {
   for (const { agentId, workspaceDir } of workspaces) {
     const bootstrapMaxChars = resolveBootstrapMaxChars(cfg, agentId);
     const bootstrapTotalMaxChars = resolveBootstrapTotalMaxChars(cfg, agentId);
+    const userBootstrapMaxChars = resolveUserBootstrapMaxChars(cfg, agentId);
     const { bootstrapFiles, contextFiles } = await resolveBootstrapContextForRun({
       workspaceDir,
       config: cfg,
@@ -64,6 +66,7 @@ export async function noteBootstrapFileSize(cfg: OpenClawConfig) {
       files: stats,
       bootstrapMaxChars,
       bootstrapTotalMaxChars,
+      userBootstrapMaxChars,
     });
     if (agentId === defaultAgentId) {
       defaultAnalysis = analysis;
@@ -93,7 +96,7 @@ export async function noteBootstrapFileSize(cfg: OpenClawConfig) {
     if (nonTruncatedNearLimit.length > 0) {
       for (const file of nonTruncatedNearLimit) {
         lines.push(
-          `- ${file.name}: ${formatInt(file.rawChars)} chars (${formatPercent(file.rawChars, bootstrapMaxChars)} of max/file ${formatInt(bootstrapMaxChars)})`,
+          `- ${file.name}: ${formatInt(file.rawChars)} chars (${formatPercent(file.rawChars, file.effectiveFileLimit)} of max/file ${formatInt(file.effectiveFileLimit)})`,
         );
       }
     }

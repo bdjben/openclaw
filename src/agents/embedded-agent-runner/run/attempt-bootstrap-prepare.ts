@@ -20,6 +20,7 @@ import {
   resolveBootstrapMaxChars,
   resolveBootstrapPromptTruncationWarningMode,
   resolveBootstrapTotalMaxChars,
+  resolveUserBootstrapMaxChars,
 } from "../../embedded-agent-helpers.js";
 import {
   DEFAULT_BOOTSTRAP_FILENAME,
@@ -150,6 +151,7 @@ export async function prepareEmbeddedAttemptBootstrap(params: {
     attempt.config,
     params.sessionAgentId,
   );
+  const userBootstrapMaxChars = resolveUserBootstrapMaxChars(attempt.config, params.sessionAgentId);
   const bootstrapAnalysis = analyzeBootstrapBudget({
     files: buildBootstrapInjectionStats({
       bootstrapFiles: bootstrapFilesForInjectionStats,
@@ -157,6 +159,7 @@ export async function prepareEmbeddedAttemptBootstrap(params: {
     }),
     bootstrapMaxChars,
     bootstrapTotalMaxChars,
+    userBootstrapMaxChars,
   });
   const bootstrapPromptWarningMode = resolveBootstrapPromptTruncationWarningMode(attempt.config);
   const bootstrapPromptWarning = buildBootstrapPromptWarning({

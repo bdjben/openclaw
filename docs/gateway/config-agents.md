@@ -114,6 +114,11 @@ Max characters per workspace bootstrap file before truncation. Default: `20000`.
 Per-agent override: `agents.entries.*.bootstrapMaxChars`. Omitted values inherit
 `agents.defaults.bootstrapMaxChars`.
 
+`USER.md` uses a 4,000-character default when neither setting is explicitly
+higher. When `agents.defaults.bootstrapMaxChars` or the agent's
+`agents.entries.*.bootstrapMaxChars` is set above `4000`, the highest configured
+value applies to `USER.md`.
+
 ### `agents.defaults.bootstrapTotalMaxChars`
 
 Max total characters injected across all workspace bootstrap files. Default: `60000`.

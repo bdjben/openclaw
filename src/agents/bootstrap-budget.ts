@@ -82,10 +82,12 @@ function isUserBootstrapName(name: string | undefined): boolean {
   return name?.toLowerCase() === "user.md";
 }
 
-function effectiveBootstrapFileLimit(name: string, bootstrapMaxChars: number): number {
-  return name.toLowerCase() === "user.md"
-    ? Math.min(bootstrapMaxChars, USER_BOOTSTRAP_MAX_CHARS)
-    : bootstrapMaxChars;
+function effectiveBootstrapFileLimit(
+  name: string,
+  bootstrapMaxChars: number,
+  userBootstrapMaxChars: number,
+): number {
+  return name.toLowerCase() === "user.md" ? userBootstrapMaxChars : bootstrapMaxChars;
 }
 
 function normalizeSeenSignatures(signatures?: string[]): string[] {
@@ -196,10 +198,14 @@ export function analyzeBootstrapBudget(params: {
   files: BootstrapInjectionStat[];
   bootstrapMaxChars: number;
   bootstrapTotalMaxChars: number;
+  userBootstrapMaxChars?: number;
   nearLimitRatio?: number;
 }): BootstrapBudgetAnalysis {
   const bootstrapMaxChars = normalizePositiveLimit(params.bootstrapMaxChars);
   const bootstrapTotalMaxChars = normalizePositiveLimit(params.bootstrapTotalMaxChars);
+  const userBootstrapMaxChars = normalizePositiveLimit(
+    params.userBootstrapMaxChars ?? USER_BOOTSTRAP_MAX_CHARS,
+  );
   const nearLimitRatio =
     typeof params.nearLimitRatio === "number" &&
     Number.isFinite(params.nearLimitRatio) &&
@@ -213,7 +219,11 @@ export function analyzeBootstrapBudget(params: {
   const totalNearLimit = injectedChars >= Math.ceil(bootstrapTotalMaxChars * nearLimitRatio);
   let remainingTotalChars = bootstrapTotalMaxChars;
   const files = params.files.map((file) => {
-    const effectiveFileLimit = effectiveBootstrapFileLimit(file.name, bootstrapMaxChars);
+    const effectiveFileLimit = effectiveBootstrapFileLimit(
+      file.name,
+      bootstrapMaxChars,
+      userBootstrapMaxChars,
+    );
     const availableTotalChars = remainingTotalChars;
     remainingTotalChars = Math.max(0, remainingTotalChars - file.injectedChars);
     if (file.missing) {
@@ -328,28 +338,20 @@ function formatBootstrapTruncationWarningLines(params: {
   if (params.analysis.truncatedFiles.some((file) => isAgentsBootstrapName(file.name))) {
     lines.push("AGENTS.md was truncated; read the full AGENTS.md before relying on scoped policy.");
   }
-  const fixedUserCapApplied = params.analysis.truncatedFiles.some(
+  const defaultUserLimitApplied = params.analysis.truncatedFiles.some(
     (file) =>
       isUserBootstrapName(file.name) &&
       file.effectiveFileLimit === USER_BOOTSTRAP_MAX_CHARS &&
       file.causes.includes("per-file-limit"),
   );
-  if (fixedUserCapApplied) {
+  if (defaultUserLimitApplied) {
     lines.push(
-      `USER.md has a fixed ${USER_BOOTSTRAP_MAX_CHARS}-character bootstrap cap; keep it compact.`,
+      `USER.md uses its default ${USER_BOOTSTRAP_MAX_CHARS}-character bootstrap limit; configure a higher bootstrapMaxChars to expand it.`,
     );
   }
-  const configurableLimitApplied = params.analysis.truncatedFiles.some(
-    (file) =>
-      !isUserBootstrapName(file.name) ||
-      file.effectiveFileLimit < USER_BOOTSTRAP_MAX_CHARS ||
-      file.causes.includes("total-limit"),
+  lines.push(
+    "If unintentional, raise agents.defaults.bootstrapMaxChars and/or agents.defaults.bootstrapTotalMaxChars.",
   );
-  if (configurableLimitApplied) {
-    lines.push(
-      "If unintentional, raise agents.defaults.bootstrapMaxChars and/or agents.defaults.bootstrapTotalMaxChars.",
-    );
-  }
   return lines;
 }
 

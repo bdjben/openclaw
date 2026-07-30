@@ -88,6 +88,7 @@ import {
   resolveBootstrapMaxChars,
   resolveBootstrapPromptTruncationWarningMode,
   resolveBootstrapTotalMaxChars,
+  resolveUserBootstrapMaxChars,
 } from "../embedded-agent-helpers.js";
 import { resolvePromptBuildHookResult } from "../embedded-agent-runner/run/attempt.prompt-helpers.js";
 import {
@@ -827,6 +828,7 @@ export async function prepareCliRunContext(
     : bootstrapFiles.filter((file) => file.name !== DEFAULT_BOOTSTRAP_FILENAME);
   const bootstrapMaxChars = resolveBootstrapMaxChars(params.config, sessionAgentId);
   const bootstrapTotalMaxChars = resolveBootstrapTotalMaxChars(params.config, sessionAgentId);
+  const userBootstrapMaxChars = resolveUserBootstrapMaxChars(params.config, sessionAgentId);
   const bootstrapAnalysis = analyzeBootstrapBudget({
     files: buildBootstrapInjectionStats({
       bootstrapFiles: bootstrapFilesForInjectionStats,
@@ -834,6 +836,7 @@ export async function prepareCliRunContext(
     }),
     bootstrapMaxChars,
     bootstrapTotalMaxChars,
+    userBootstrapMaxChars,
   });
   const bootstrapPromptWarningMode = resolveBootstrapPromptTruncationWarningMode(params.config);
   const bootstrapPromptWarning = buildBootstrapPromptWarning({

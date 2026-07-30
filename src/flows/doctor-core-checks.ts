@@ -552,8 +552,11 @@ const bootstrapSizeCheck: HealthCheck = {
     const { buildBootstrapInjectionStats, analyzeBootstrapBudget } =
       await import("../agents/bootstrap-budget.js");
     const { resolveBootstrapContextForRun } = await import("../agents/bootstrap-files.js");
-    const { resolveBootstrapMaxChars, resolveBootstrapTotalMaxChars } =
-      await import("../agents/embedded-agent-helpers.js");
+    const {
+      resolveBootstrapMaxChars,
+      resolveBootstrapTotalMaxChars,
+      resolveUserBootstrapMaxChars,
+    } = await import("../agents/embedded-agent-helpers.js");
     const defaultAgentId = resolveDefaultAgentId(ctx.cfg);
     const workspaceDir = resolveAgentWorkspaceDir(ctx.cfg, defaultAgentId);
     const { bootstrapFiles, contextFiles } = await resolveBootstrapContextForRun({
@@ -568,6 +571,7 @@ const bootstrapSizeCheck: HealthCheck = {
       }),
       bootstrapMaxChars: resolveBootstrapMaxChars(ctx.cfg, defaultAgentId),
       bootstrapTotalMaxChars: resolveBootstrapTotalMaxChars(ctx.cfg, defaultAgentId),
+      userBootstrapMaxChars: resolveUserBootstrapMaxChars(ctx.cfg, defaultAgentId),
     });
     const findings: HealthFinding[] = [];
     for (const file of analysis.truncatedFiles) {

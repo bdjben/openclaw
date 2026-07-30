@@ -88,8 +88,8 @@ export function stripThoughtSignatures<T>(
 
 const DEFAULT_BOOTSTRAP_MAX_CHARS = 20_000;
 const DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 60_000;
-// USER.md stays directive-sized so profile guidance cannot crowd out project
-// rules or durable facts from the shared bootstrap budget.
+// USER.md stays directive-sized by default, while an explicit operator-selected
+// bootstrapMaxChars above this floor remains authoritative.
 export const USER_BOOTSTRAP_MAX_CHARS = 4_000;
 const DEFAULT_BOOTSTRAP_PROMPT_TRUNCATION_WARNING_MODE = "always";
 const MIN_BOOTSTRAP_FILE_BUDGET_CHARS = 64;
@@ -119,16 +119,34 @@ type PolicyDigest = {
   omittedLines: number;
 };
 
+function normalizeConfiguredBootstrapLimit(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  return undefined;
+}
+
 export function resolveBootstrapMaxChars(cfg?: OpenClawConfig, agentId?: string | null): number {
   const raw =
     cfg && agentId
       ? (resolveAgentConfig(cfg, agentId)?.bootstrapMaxChars ??
         cfg.agents?.defaults?.bootstrapMaxChars)
       : cfg?.agents?.defaults?.bootstrapMaxChars;
-  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
-    return Math.floor(raw);
-  }
-  return DEFAULT_BOOTSTRAP_MAX_CHARS;
+  return normalizeConfiguredBootstrapLimit(raw) ?? DEFAULT_BOOTSTRAP_MAX_CHARS;
+}
+
+export function resolveUserBootstrapMaxChars(
+  cfg?: OpenClawConfig,
+  agentId?: string | null,
+): number {
+  const agentMaxChars =
+    cfg && agentId
+      ? normalizeConfiguredBootstrapLimit(resolveAgentConfig(cfg, agentId)?.bootstrapMaxChars)
+      : undefined;
+  const defaultMaxChars = normalizeConfiguredBootstrapLimit(
+    cfg?.agents?.defaults?.bootstrapMaxChars,
+  );
+  return Math.max(USER_BOOTSTRAP_MAX_CHARS, agentMaxChars ?? 0, defaultMaxChars ?? 0);
 }
 
 export function resolveBootstrapTotalMaxChars(
@@ -140,10 +158,7 @@ export function resolveBootstrapTotalMaxChars(
       ? (resolveAgentConfig(cfg, agentId)?.bootstrapTotalMaxChars ??
         cfg.agents?.defaults?.bootstrapTotalMaxChars)
       : cfg?.agents?.defaults?.bootstrapTotalMaxChars;
-  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
-    return Math.floor(raw);
-  }
-  return DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS;
+  return normalizeConfiguredBootstrapLimit(raw) ?? DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS;
 }
 
 export function resolveBootstrapPromptTruncationWarningMode(
@@ -387,9 +402,15 @@ function clampToBudget(content: string, budget: number): string {
 
 export function buildBootstrapContextFiles(
   files: WorkspaceBootstrapFile[],
-  opts?: { warn?: (message: string) => void; maxChars?: number; totalMaxChars?: number },
+  opts?: {
+    warn?: (message: string) => void;
+    maxChars?: number;
+    totalMaxChars?: number;
+    userMaxChars?: number;
+  },
 ): EmbeddedContextFile[] {
   const maxChars = opts?.maxChars ?? DEFAULT_BOOTSTRAP_MAX_CHARS;
+  const userMaxChars = opts?.userMaxChars ?? USER_BOOTSTRAP_MAX_CHARS;
   const totalMaxChars = Math.max(
     1,
     Math.floor(opts?.totalMaxChars ?? Math.max(maxChars, DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS)),
@@ -426,9 +447,7 @@ export function buildBootstrapContextFiles(
       );
       break;
     }
-    const fileBudget = isUserBootstrapFile(file.name)
-      ? Math.min(maxChars, USER_BOOTSTRAP_MAX_CHARS)
-      : maxChars;
+    const fileBudget = isUserBootstrapFile(file.name) ? userMaxChars : maxChars;
     const fileMaxChars = Math.max(1, Math.min(fileBudget, remainingTotalChars));
     const trimmed = trimBootstrapContent(file.content ?? "", file.name, fileMaxChars);
     const contentWithinBudget = clampToBudget(trimmed.content, remainingTotalChars);

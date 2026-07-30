@@ -6,6 +6,7 @@ import {
   resolveBootstrapMaxChars,
   resolveBootstrapPromptTruncationWarningMode,
   resolveBootstrapTotalMaxChars,
+  resolveUserBootstrapMaxChars,
 } from "./embedded-agent-helpers.js";
 import type { WorkspaceBootstrapFile } from "./workspace.js";
 import { DEFAULT_AGENTS_FILENAME } from "./workspace.js";
@@ -135,6 +136,15 @@ describe("buildBootstrapContextFiles", () => {
     expect(result[0]?.content).toContain("read USER.md for full content");
     expect(result[1]?.content).toBe("m".repeat(10_000));
   });
+  it("honors an explicit USER.md budget above the default", () => {
+    const content = "u".repeat(10_000);
+    const result = buildBootstrapContextFiles(
+      [makeFile({ name: "USER.md", path: "/tmp/USER.md", content })],
+      { userMaxChars: 12_000 },
+    );
+
+    expect(result[0]?.content).toBe(content);
+  });
   it("keeps policy digest lines from oversized AGENTS.md middle content", () => {
     // AGENTS.md truncation keeps scoped-policy signals from the middle so model
     // prompts do not lose routing instructions just because head/tail are large.
@@ -162,8 +172,8 @@ describe("buildBootstrapContextFiles", () => {
     const content = `HEAD-${"a".repeat(1_000)}-TAIL`;
     const files = [
       makeFile({
-        name: "USER.md",
-        path: "/tmp/USER.md",
+        name: "SOUL.md",
+        path: "/tmp/SOUL.md",
         content,
       }),
     ];
@@ -178,8 +188,8 @@ describe("buildBootstrapContextFiles", () => {
     const content = `HEAD-${"a".repeat(1_000)}-TAIL`;
     const files = [
       makeFile({
-        name: "USER.md",
-        path: "/tmp/USER.md",
+        name: "SOUL.md",
+        path: "/tmp/SOUL.md",
         content,
       }),
     ];
@@ -367,6 +377,27 @@ describe("bootstrap limit resolvers", () => {
       } as OpenClawConfig;
       expect(resolver.resolve(cfg)).toBe(resolver.defaultValue);
     }
+  });
+});
+
+describe("resolveUserBootstrapMaxChars", () => {
+  it("uses 4000 when no higher limit is explicitly configured", () => {
+    expect(resolveUserBootstrapMaxChars()).toBe(4_000);
+  });
+
+  it("uses the highest explicit agent or default limit", () => {
+    const cfg = {
+      agents: {
+        defaults: { bootstrapMaxChars: 12_000 },
+        entries: {
+          worker: { bootstrapMaxChars: 8_000 },
+          larger: { bootstrapMaxChars: 16_000 },
+        },
+      },
+    } as OpenClawConfig;
+
+    expect(resolveUserBootstrapMaxChars(cfg, "worker")).toBe(12_000);
+    expect(resolveUserBootstrapMaxChars(cfg, "larger")).toBe(16_000);
   });
 });
 

@@ -6,6 +6,7 @@ import { isRealConversationMessage } from "../../agents/compaction-real-conversa
 import {
   resolveBootstrapMaxChars,
   resolveBootstrapTotalMaxChars,
+  resolveUserBootstrapMaxChars,
 } from "../../agents/embedded-agent-helpers/bootstrap.js";
 import {
   createMessageCharEstimateCache,
@@ -317,6 +318,7 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
     files: report.injectedWorkspaceFiles,
     bootstrapMaxChars,
     bootstrapTotalMaxChars,
+    userBootstrapMaxChars: resolveUserBootstrapMaxChars(params.cfg, sessionAgentId),
   });
   const truncatedBootstrapFiles = bootstrapAnalysis.truncatedFiles;
   const truncationCauseCounts = truncatedBootstrapFiles.reduce(
