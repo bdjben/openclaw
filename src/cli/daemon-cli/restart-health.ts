@@ -3,7 +3,12 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import type { GatewayServiceRuntime } from "../../daemon/service-runtime.js";
 import type { GatewayService } from "../../daemon/service.js";
 import type { PluginHealthErrorSummary } from "../../gateway/health/types.js";
-import { classifyPortListener, inspectPortUsage, type PortUsage } from "../../infra/ports.js";
+import {
+  classifyPortListener,
+  inspectPortUsage,
+  LOOPBACK_PORT_PROBE_HOSTS,
+  type PortUsage,
+} from "../../infra/ports.js";
 import {
   hasActiveStartupMigrationLease,
   STARTUP_MIGRATION_LEASE_TTL_MS,
@@ -114,7 +119,9 @@ export async function inspectGatewayRestart(params: {
 
   let portUsage: PortUsage;
   try {
-    portUsage = await inspectPortUsage(params.port);
+    portUsage = await inspectPortUsage(params.port, {
+      probeHosts: LOOPBACK_PORT_PROBE_HOSTS,
+    });
   } catch (err) {
     portUsage = {
       port: params.port,

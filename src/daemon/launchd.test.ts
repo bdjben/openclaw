@@ -405,6 +405,7 @@ vi.mock("../infra/ports.js", () => ({
 }));
 
 vi.mock("../infra/ports-probe.js", () => ({
+  LOOPBACK_PORT_PROBE_HOSTS: ["127.0.0.1"],
   probePortUsage,
 }));
 
@@ -1921,7 +1922,9 @@ describe("launchd install", () => {
     await stopLaunchAgent({ env, stdout });
 
     expect(cleanStaleGatewayProcessesSync).toHaveBeenCalledWith(19003);
-    expect(inspectPortUsage).toHaveBeenCalledWith(19003);
+    expect(inspectPortUsage).toHaveBeenCalledWith(19003, {
+      probeHosts: ["127.0.0.1"],
+    });
     expect(output).toContain("Stopped LaunchAgent");
   });
 
@@ -1940,7 +1943,7 @@ describe("launchd install", () => {
     await runStopLaunchAgentWithFakeTimers({ env, stdout: new PassThrough() });
 
     expect(inspectPortUsage).toHaveBeenCalledTimes(1);
-    expect(probePortUsage).toHaveBeenCalledWith(19009);
+    expect(probePortUsage).toHaveBeenCalledWith(19009, ["127.0.0.1"]);
   });
 
   it("keeps waiting until a bind probe explicitly confirms port release", async () => {
@@ -1974,7 +1977,9 @@ describe("launchd install", () => {
     await stopLaunchAgent({ env, stdout: new PassThrough() });
 
     expect(cleanStaleGatewayProcessesSync).toHaveBeenCalledWith(19006);
-    expect(inspectPortUsage).toHaveBeenCalledWith(19006);
+    expect(inspectPortUsage).toHaveBeenCalledWith(19006, {
+      probeHosts: ["127.0.0.1"],
+    });
   });
 
   it("fails stop when the verified gateway port remains busy after cleanup", async () => {
@@ -2003,7 +2008,9 @@ describe("launchd install", () => {
 
     expect(onMutation).toHaveBeenCalledWith({ mode: "bootout" });
     expect(cleanStaleGatewayProcessesSync).toHaveBeenCalledWith(19004);
-    expect(inspectPortUsage).toHaveBeenCalledWith(19004);
+    expect(inspectPortUsage).toHaveBeenCalledWith(19004, {
+      probeHosts: ["127.0.0.1"],
+    });
     expect(output).not.toContain("Stopped LaunchAgent");
   });
 
@@ -2041,7 +2048,9 @@ describe("launchd install", () => {
     await stopLaunchAgent({ env, stdout, disable: true });
 
     expect(cleanStaleGatewayProcessesSync).toHaveBeenCalledWith(19005);
-    expect(inspectPortUsage).toHaveBeenCalledWith(19005);
+    expect(inspectPortUsage).toHaveBeenCalledWith(19005, {
+      probeHosts: ["127.0.0.1"],
+    });
     expect(output).toContain("Stopped LaunchAgent");
   });
 
@@ -2605,7 +2614,9 @@ describe("launchd install", () => {
         resolveProtectedPid: expect.any(Function),
       }),
     );
-    expect(inspectPortUsage).toHaveBeenCalledWith(19007);
+    expect(inspectPortUsage).toHaveBeenCalledWith(19007, {
+      probeHosts: ["127.0.0.1"],
+    });
   });
 
   it("uses the final repeated LaunchAgent port flag for restart stale cleanup", async () => {
@@ -2629,7 +2640,9 @@ describe("launchd install", () => {
         resolveProtectedPid: expect.any(Function),
       }),
     );
-    expect(inspectPortUsage).toHaveBeenCalledWith(19008);
+    expect(inspectPortUsage).toHaveBeenCalledWith(19008, {
+      probeHosts: ["127.0.0.1"],
+    });
   });
 
   it("ignores invalid stored LaunchAgent environment ports for stale cleanup", async () => {
@@ -2696,7 +2709,9 @@ describe("launchd install", () => {
         expect.objectContaining({ resolveProtectedPid: expect.any(Function) }),
       );
       expect(state.cleanupProtectedPids).toEqual([managedPidAfterCleanup]);
-      expect(inspectPortUsage).toHaveBeenCalledWith(19002);
+      expect(inspectPortUsage).toHaveBeenCalledWith(19002, {
+        probeHosts: ["127.0.0.1"],
+      });
       expect(state.launchctlCalls).toEqual([
         ["print", serviceId],
         ["print", serviceId],
@@ -2764,7 +2779,9 @@ describe("launchd install", () => {
         expect.objectContaining({ resolveProtectedPid: expect.any(Function) }),
       );
       expect(state.cleanupProtectedPids).toEqual([4242]);
-      expect(inspectPortUsage).toHaveBeenCalledWith(19002);
+      expect(inspectPortUsage).toHaveBeenCalledWith(19002, {
+        probeHosts: ["127.0.0.1"],
+      });
       expect(state.launchctlCalls).toEqual([
         ["print", serviceId],
         ["print", serviceId],

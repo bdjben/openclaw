@@ -34,6 +34,9 @@ describe("restart health", () => {
 
     expect(snapshot.healthy).toBe(true);
     expect(snapshot.staleGatewayPids).toStrictEqual([]);
+    expect(inspectPortUsage).toHaveBeenCalledWith(18789, {
+      probeHosts: ["127.0.0.1"],
+    });
   });
 
   it("marks non-owned gateway listener pids as stale while runtime is running", async () => {

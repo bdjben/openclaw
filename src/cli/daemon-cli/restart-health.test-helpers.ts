@@ -5,7 +5,8 @@ import type { PortUsage } from "../../infra/ports.js";
 
 type PortListenerKind = ReturnType<typeof import("../../infra/ports.js").classifyPortListener>;
 
-export const inspectPortUsage = vi.fn<(port: number) => Promise<PortUsage>>();
+export const inspectPortUsage =
+  vi.fn<(port: number, options?: { probeHosts?: readonly string[] }) => Promise<PortUsage>>();
 export const monotonicClock = { nowMs: 0 };
 export const sleep = vi.fn(async (ms: number) => {
   monotonicClock.nowMs += ms;
@@ -25,7 +26,9 @@ export const readActiveGatewayLockIdentity = vi.fn();
 vi.mock("../../infra/ports.js", () => ({
   classifyPortListener: (listener: unknown, port: number) => classifyPortListener(listener, port),
   formatPortDiagnostics: vi.fn(() => []),
-  inspectPortUsage: (port: number) => inspectPortUsage(port),
+  inspectPortUsage: (port: number, options?: { probeHosts?: readonly string[] }) =>
+    inspectPortUsage(port, options),
+  LOOPBACK_PORT_PROBE_HOSTS: ["127.0.0.1"],
 }));
 
 vi.mock("../../gateway/probe.js", () => ({

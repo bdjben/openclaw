@@ -6,7 +6,7 @@ import path from "node:path";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { normalizeEnvVarKey } from "../infra/host-env-security.js";
 import { parseStrictInteger, parseStrictPositiveInteger } from "../infra/parse-finite-number.js";
-import { probePortUsage } from "../infra/ports-probe.js";
+import { LOOPBACK_PORT_PROBE_HOSTS, probePortUsage } from "../infra/ports-probe.js";
 import { formatPortDiagnostics, inspectPortUsage } from "../infra/ports.js";
 import { cleanStaleGatewayProcessesSync } from "../infra/restart-stale-pids.js";
 import { parseTcpPort, parseTcpPortFromArgs } from "../infra/tcp-port.js";
@@ -1044,7 +1044,7 @@ async function waitForGatewayPortRelease(port: number): Promise<boolean> {
   const deadline = Date.now() + LAUNCH_AGENT_STOP_PORT_RELEASE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await sleep(Math.min(LAUNCH_AGENT_STOP_PORT_RELEASE_POLL_MS, deadline - Date.now()));
-    const status = await probePortUsage(port);
+    const status = await probePortUsage(port, LOOPBACK_PORT_PROBE_HOSTS);
     if (status === "free") {
       return true;
     }
@@ -1058,7 +1058,9 @@ async function assertGatewayPortReleasedAfterStop(env: GatewayServiceEnv): Promi
     return;
   }
   cleanStaleGatewayProcessesSync(port);
-  const diagnostics = await inspectPortUsage(port).catch(() => null);
+  const diagnostics = await inspectPortUsage(port, {
+    probeHosts: LOOPBACK_PORT_PROBE_HOSTS,
+  }).catch(() => null);
   if (diagnostics?.status !== "busy") {
     return;
   }
@@ -1475,7 +1477,9 @@ export async function restartLaunchAgent({
       // during enumeration must be protected before candidate filtering/signals.
       resolveProtectedPid: () => readLaunchAgentPidForCleanupSync(serviceTarget),
     });
-    const diagnostics = await inspectPortUsage(cleanupPort).catch(() => null);
+    const diagnostics = await inspectPortUsage(cleanupPort, {
+      probeHosts: LOOPBACK_PORT_PROBE_HOSTS,
+    }).catch(() => null);
     if (diagnostics?.status === "busy") {
       const runtime = await readLaunchAgentRuntime(serviceEnv);
       const managedPid = runtime.pid;

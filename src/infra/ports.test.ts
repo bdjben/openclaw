@@ -134,6 +134,45 @@ describe("ports helpers", () => {
 });
 
 describeUnix("inspectPortUsage", () => {
+  it("ignores another interface when inspection is scoped to the gateway loopback", async () => {
+    const server = net.createServer();
+    const address = await listenServer(server, 0, "127.0.0.2");
+    if (!address) {
+      return;
+    }
+    const port = address.port;
+
+    runCommandWithTimeoutMock.mockImplementation(async (argv: string[]) => {
+      const command = argv[0];
+      if (typeof command === "string" && command.includes("lsof")) {
+        return {
+          stdout: `p${process.pid}\ncnode\nnTCP 127.0.0.2:${port} (LISTEN)\n`,
+          stderr: "",
+          code: 0,
+        };
+      }
+      return { stdout: "", stderr: "", code: 1 };
+    });
+
+    try {
+      const allInterfaces = await inspectPortUsage(port);
+      const gatewayLoopback = await inspectPortUsage(port, {
+        probeHosts: ["127.0.0.1"],
+      });
+
+      expect(allInterfaces.status).toBe("busy");
+      expect(gatewayLoopback).toMatchObject({
+        status: "free",
+        listeners: [],
+        hints: [],
+      });
+    } finally {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    }
+  });
+
   it("reports busy when lsof is missing but loopback listener exists", async () => {
     const server = net.createServer();
     const address = await listenServer(server, 0, "127.0.0.1");

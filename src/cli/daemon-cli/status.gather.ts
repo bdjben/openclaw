@@ -495,17 +495,21 @@ function toPortStatusSummary(
 async function inspectDaemonPortStatuses(params: {
   daemonPort: number;
   cliPort: number;
+  daemonBindHost: string;
 }): Promise<{ portStatus?: PortStatusSummary; portCliStatus?: PortStatusSummary }> {
+  const daemonProbeHosts = [params.daemonBindHost];
   if (params.cliPort === params.daemonPort) {
-    const portDiagnostics = await inspectPortUsage(params.daemonPort).catch(() => null);
+    const portDiagnostics = await inspectPortUsage(params.daemonPort, {
+      probeHosts: daemonProbeHosts,
+    }).catch(() => null);
     return {
       portStatus: toPortStatusSummary(portDiagnostics),
       portCliStatus: undefined,
     };
   }
-  const portDiagnosticsByPort = await inspectPortUsages([params.daemonPort, params.cliPort]).catch(
-    () => new Map(),
-  );
+  const portDiagnosticsByPort = await inspectPortUsages([params.daemonPort, params.cliPort], {
+    probeHostsByPort: new Map([[params.daemonPort, daemonProbeHosts]]),
+  }).catch(() => new Map());
   return {
     portStatus: toPortStatusSummary(portDiagnosticsByPort.get(params.daemonPort) ?? null),
     portCliStatus: toPortStatusSummary(portDiagnosticsByPort.get(params.cliPort) ?? null),
@@ -624,6 +628,7 @@ export async function gatherDaemonStatus(
   const { portStatus, portCliStatus } = await inspectDaemonPortStatuses({
     daemonPort,
     cliPort,
+    daemonBindHost: gateway.bindHost,
   });
   const establishedClients = await inspectEstablishedGatewayClients({
     daemonPort,

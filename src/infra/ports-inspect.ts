@@ -620,20 +620,28 @@ async function readWindowsEstablishedConnections(
   return { connections: result.entries, detail: result.detail, errors: result.errors };
 }
 
-export async function inspectPortUsage(port: number): Promise<PortUsage> {
+export async function inspectPortUsage(
+  port: number,
+  options?: { probeHosts?: readonly string[] },
+): Promise<PortUsage> {
   const result =
     process.platform === "win32" ? await readWindowsListeners(port) : await readUnixListeners(port);
-  return buildPortUsage(port, result);
+  return buildPortUsage(port, result, options?.probeHosts);
 }
 
-async function buildPortUsage(port: number, result: ListenerReadResult): Promise<PortUsage> {
+async function buildPortUsage(
+  port: number,
+  result: ListenerReadResult,
+  probeHosts?: readonly string[],
+): Promise<PortUsage> {
   const errors: string[] = [];
   errors.push(...result.errors);
   let listeners = result.listeners;
-  let status: PortUsageStatus = listeners.length > 0 ? "busy" : "unknown";
-  if (listeners.length === 0) {
-    status = await probePortUsage(port);
-  }
+  const status: PortUsageStatus = probeHosts
+    ? await probePortUsage(port, probeHosts)
+    : listeners.length > 0
+      ? "busy"
+      : await probePortUsage(port);
   if (status !== "busy") {
     listeners = [];
   }
@@ -653,11 +661,20 @@ async function buildPortUsage(port: number, result: ListenerReadResult): Promise
   };
 }
 
-export async function inspectPortUsages(ports: readonly number[]): Promise<Map<number, PortUsage>> {
+export async function inspectPortUsages(
+  ports: readonly number[],
+  options?: { probeHostsByPort?: ReadonlyMap<number, readonly string[]> },
+): Promise<Map<number, PortUsage>> {
   const uniquePorts = Array.from(new Set(ports));
   if (process.platform === "win32") {
     const entries = await Promise.all(
-      uniquePorts.map(async (port) => [port, await inspectPortUsage(port)] as const),
+      uniquePorts.map(async (port) => {
+        const probeHosts = options?.probeHostsByPort?.get(port);
+        return [
+          port,
+          await inspectPortUsage(port, probeHosts ? { probeHosts } : undefined),
+        ] as const;
+      }),
     );
     return new Map(entries);
   }
@@ -666,7 +683,14 @@ export async function inspectPortUsages(ports: readonly number[]): Promise<Map<n
   const entries = await Promise.all(
     uniquePorts.map(
       async (port) =>
-        [port, await buildPortUsage(port, await readUnixListeners(port, snapshot))] as const,
+        [
+          port,
+          await buildPortUsage(
+            port,
+            await readUnixListeners(port, snapshot),
+            options?.probeHostsByPort?.get(port),
+          ),
+        ] as const,
     ),
   );
   return new Map(entries);
