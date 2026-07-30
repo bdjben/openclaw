@@ -13,7 +13,6 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
@@ -21,7 +20,10 @@ import {
   type PersistentDedupeEntry,
 } from "openclaw/plugin-sdk/persistent-dedupe";
 import type { PluginDoctorStateMigrationContext } from "openclaw/plugin-sdk/runtime-doctor";
-import { runSqliteImmediateTransactionSync } from "openclaw/plugin-sdk/sqlite-runtime";
+import {
+  openNodeSqliteDatabase,
+  runSqliteImmediateTransactionSync,
+} from "openclaw/plugin-sdk/sqlite-runtime";
 import { isRecord } from "../../record-shared.js";
 import { normalizeMatrixStorageMetadata } from "../client/storage.js";
 import {
@@ -126,11 +128,6 @@ export async function reserveMatrixInboundDedupeMigrationCompletion(
     MIGRATION_COMPLETION_KEY,
     { version: 1, completedAt: -1 },
   );
-}
-
-function loadNodeSqlite(): typeof import("node:sqlite") {
-  const req = createRequire(import.meta.url);
-  return req("node:sqlite") as typeof import("node:sqlite");
 }
 
 export async function collectMatrixInboundDedupeSources(
@@ -252,9 +249,8 @@ function parseLegacySqliteRow(row: {
 export async function readLegacyInboundDedupeSqliteSource(
   storageRootDir: string,
 ): Promise<{ markers: LegacyInboundDedupeMarker[]; legacyRowCount: number }> {
-  const { DatabaseSync: SqliteDatabase } = loadNodeSqlite();
   const databasePath = path.join(storageRootDir, STATE_DATABASE_RELATIVE_PATH);
-  const db = new SqliteDatabase(databasePath, { readOnly: true });
+  const db = openNodeSqliteDatabase(databasePath, { readOnly: true });
   try {
     const rows = selectLegacySqliteRows(db);
     const markers: LegacyInboundDedupeMarker[] = [];
@@ -286,9 +282,8 @@ export async function readLegacyInboundDedupeSqliteSource(
 
 /** Deletes only the two retired Matrix namespaces after a successful import. */
 export async function retireLegacyInboundDedupeSqliteRows(storageRootDir: string): Promise<void> {
-  const { DatabaseSync: SqliteDatabase } = loadNodeSqlite();
   const databasePath = path.join(storageRootDir, STATE_DATABASE_RELATIVE_PATH);
-  const db = new SqliteDatabase(databasePath);
+  const db = openNodeSqliteDatabase(databasePath);
   try {
     // Plan outside the write transaction, then re-read after BEGIN IMMEDIATE
     // before deleting. The predicates intentionally cannot touch other Matrix
