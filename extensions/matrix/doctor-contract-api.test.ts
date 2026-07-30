@@ -3,7 +3,6 @@ import "fake-indexeddb/auto";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -23,6 +22,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { PluginDoctorStateMigrationContext } from "openclaw/plugin-sdk/runtime-doctor";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { stateMigrations } from "./doctor-contract-api.js";
 import { SqliteBackedMatrixSyncStore } from "./src/matrix/client/file-sync-store.js";
 import { openMatrixStorageMetaStoreOptions } from "./src/matrix/client/storage.js";
@@ -91,7 +91,7 @@ function migrationById(id: string) {
 }
 
 describe("matrix doctor contract state migrations", () => {
-  const tempDirs: string[] = [];
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
   beforeEach(() => {
     resetPluginStateStoreForTests();
@@ -102,14 +102,10 @@ describe("matrix doctor contract state migrations", () => {
     await clearAllIndexedDbState({ databasePrefix: DOCTOR_IDB_DATABASE_PREFIX });
     vi.restoreAllMocks();
     resetPluginStateStoreForTests();
-    for (const dir of tempDirs.splice(0)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   it("imports account credentials into SQLite before archiving the JSON", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const credentialsDir = path.join(stateDir, "credentials", "matrix");
     const filePath = path.join(credentialsDir, "credentials-ops.json");
     const credentials = {
@@ -148,8 +144,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("archives legacy credentials without restoring an explicitly cleared account", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const credentialsDir = path.join(stateDir, "credentials", "matrix");
     const filePath = path.join(credentialsDir, "credentials-ops.json");
     fs.mkdirSync(credentialsDir, { recursive: true });
@@ -187,8 +182,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("migrates legacy sync cache JSON to SQLite plugin state", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const storageRootDir = path.join(
       stateDir,
       "matrix",
@@ -281,8 +275,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("migrates Matrix storage metadata JSON to SQLite plugin state", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const storageRootDir = path.join(
       stateDir,
       "matrix",
@@ -329,8 +322,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("does not archive the legacy flat sync cache into an unread SQLite root", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const flatRoot = path.join(stateDir, "matrix");
     fs.mkdirSync(flatRoot, { recursive: true });
     fs.writeFileSync(
@@ -352,8 +344,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("migrates Matrix recovery-key JSON to SQLite plugin state", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const storageRootDir = path.join(
       stateDir,
       "matrix",
@@ -394,8 +385,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("migrates legacy Matrix crypto state and restores the snapshot from SQLite", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const storageRootDir = path.join(stateDir, "matrix");
     fs.mkdirSync(storageRootDir, { recursive: true });
     const snapshotPath = path.join(storageRootDir, MATRIX_IDB_SNAPSHOT_FILENAME);
@@ -469,8 +459,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("archives an invalid legacy snapshot for recovery and unblocks runtime", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const storageRootDir = path.join(stateDir, "matrix");
     const snapshotPath = path.join(storageRootDir, MATRIX_IDB_SNAPSHOT_FILENAME);
     fs.mkdirSync(storageRootDir, { recursive: true });
@@ -493,8 +482,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("repairs invalid snapshots, archives equivalents, and preserves conflicts", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const partialRoot = path.join(stateDir, "matrix", "accounts", "partial");
     const conflictRoot = path.join(stateDir, "matrix", "accounts", "conflict");
     const equivalentRoot = path.join(stateDir, "matrix", "accounts", "equivalent");
@@ -580,8 +568,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("detects, imports, and retires schema-v1 inbound dedupe rows without upgrading the source", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const sqliteRoot = path.join(
       stateDir,
       "matrix",
@@ -779,8 +766,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("records an empty legacy scan and then skips historical databases", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const migration = migrationById("matrix-inbound-dedupe-to-claimable-dedupe");
     const params = createMigrationParams(stateDir);
 
@@ -813,8 +799,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("withholds completion after a directory read failure and imports the source on retry", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const blockedDir = path.join(stateDir, "matrix", "accounts", "home");
     const jsonRoot = path.join(blockedDir, "matrix.example.org__bot", "token-a");
     const jsonPath = path.join(jsonRoot, "inbound-dedupe.json");
@@ -871,8 +856,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("ignores an invalid legacy-scan completion receipt", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const params = createMigrationParams(stateDir);
     const receiptStore = params.context.openPluginStateKeyedStore<{
       version: number;
@@ -896,8 +880,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("archives malformed inbound dedupe JSON without importing it", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const jsonRoot = path.join(
       stateDir,
       "matrix",
@@ -928,8 +911,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("keeps inbound dedupe sources when retention-aware import is unavailable", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const jsonRoot = path.join(
       stateDir,
       "matrix",
@@ -965,8 +947,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("keeps newer runtime dedupe rows when legacy imports hit capacity", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const env = { OPENCLAW_STATE_DIR: stateDir };
     const io = { context: createContext(env), env };
     const roomId = "!room:example.org";
@@ -1014,8 +995,7 @@ describe("matrix doctor contract state migrations", () => {
   });
 
   it("preserves a legacy inbound dedupe marker's remaining TTL", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const env = { OPENCLAW_STATE_DIR: stateDir };
     const io = { context: createContext(env), env };
     const now = 2_000_000_000_000;

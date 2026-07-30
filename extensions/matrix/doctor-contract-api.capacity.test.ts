@@ -1,6 +1,5 @@
 // Matrix tests cover plugin-wide capacity during inbound dedupe migration.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
@@ -17,6 +16,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { PluginDoctorStateMigrationContext } from "openclaw/plugin-sdk/runtime-doctor";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { stateMigrations } from "./doctor-contract-api.js";
 import {
   MATRIX_INBOUND_DEDUPE_TTL_MS,
@@ -83,7 +83,7 @@ function writeLegacyDedupeSource(stateDir: string, now: number, withMetadata = f
 }
 
 describe("matrix inbound dedupe migration capacity", () => {
-  const tempDirs: string[] = [];
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
   beforeEach(() => {
     resetPluginStateStoreForTests();
@@ -92,14 +92,10 @@ describe("matrix inbound dedupe migration capacity", () => {
   afterEach(() => {
     setMaxPluginStateEntriesPerPluginForTests(undefined);
     resetPluginStateStoreForTests();
-    for (const dir of tempDirs.splice(0)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   it("keeps sources when completion capacity cannot be reserved", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-capacity-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-capacity-");
     const jsonPath = writeLegacyDedupeSource(stateDir, Date.now());
     const params = createMigrationParams(stateDir);
     setMaxPluginStateEntriesPerPluginForTests(3);
@@ -135,8 +131,7 @@ describe("matrix inbound dedupe migration capacity", () => {
   });
 
   it("reserves completion capacity before bounded import", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-capacity-"));
-    tempDirs.push(stateDir);
+    const stateDir = tempDirs.make("openclaw-matrix-capacity-");
     const now = Date.now();
     const jsonPath = writeLegacyDedupeSource(stateDir, now, true);
     const params = createMigrationParams(stateDir);
