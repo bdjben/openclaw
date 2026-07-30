@@ -17,6 +17,7 @@ import type {
 } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createPluginStateKeyedStoreForTests,
+  getPluginStateCapacityForTests,
   importPluginStateEntriesForDoctorForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
@@ -57,8 +58,11 @@ import { installMatrixTestRuntime } from "./src/test-runtime.js";
 
 const DOCTOR_IDB_DATABASE_PREFIX = "openclaw-matrix-doctor-test";
 
-function createContext(): PluginDoctorStateMigrationContext {
+function createContext(env?: NodeJS.ProcessEnv): PluginDoctorStateMigrationContext {
   return {
+    getPluginStateCapacity() {
+      return getPluginStateCapacityForTests("matrix", env);
+    },
     importPluginStateEntries(options, entries) {
       importPluginStateEntriesForDoctorForTests("matrix", options, entries);
     },
@@ -68,12 +72,13 @@ function createContext(): PluginDoctorStateMigrationContext {
 }
 
 function createMigrationParams(stateDir: string) {
+  const env = { OPENCLAW_STATE_DIR: stateDir };
   return {
     config: {} as OpenClawConfig,
-    env: { OPENCLAW_STATE_DIR: stateDir },
+    env,
     stateDir,
     oauthDir: path.join(stateDir, "oauth"),
-    context: createContext(),
+    context: createContext(env),
   };
 }
 
@@ -962,7 +967,8 @@ describe("matrix doctor contract state migrations", () => {
   it("keeps newer runtime dedupe rows when legacy imports hit capacity", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
     tempDirs.push(stateDir);
-    const io = { context: createContext(), env: { OPENCLAW_STATE_DIR: stateDir } };
+    const env = { OPENCLAW_STATE_DIR: stateDir };
+    const io = { context: createContext(env), env };
     const roomId = "!room:example.org";
     const now = Date.now();
     const store = createPluginStateKeyedStoreForTests<PersistentDedupeEntry>("matrix", {
@@ -1011,7 +1017,7 @@ describe("matrix doctor contract state migrations", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-doctor-"));
     tempDirs.push(stateDir);
     const env = { OPENCLAW_STATE_DIR: stateDir };
-    const io = { context: createContext(), env };
+    const io = { context: createContext(env), env };
     const now = 2_000_000_000_000;
     const remainingTtlMs = 1_000;
     const roomId = "!room:example.org";

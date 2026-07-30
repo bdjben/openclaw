@@ -113,6 +113,21 @@ export async function recordMatrixInboundDedupeMigrationCompletion(
   );
 }
 
+/**
+ * Reserves the durable completion row before any legacy source is changed.
+ * The invalid timestamp keeps detection active after an interrupted run, while
+ * updating this same key after retirement remains possible at plugin capacity.
+ */
+export async function reserveMatrixInboundDedupeMigrationCompletion(
+  context: PluginDoctorStateMigrationContext,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  await openMatrixInboundDedupeMigrationCompletionStore(context, env).register(
+    MIGRATION_COMPLETION_KEY,
+    { version: 1, completedAt: -1 },
+  );
+}
+
 function loadNodeSqlite(): typeof import("node:sqlite") {
   const req = createRequire(import.meta.url);
   return req("node:sqlite") as typeof import("node:sqlite");
@@ -431,7 +446,16 @@ export async function importNewestInboundDedupeMarkers(params: {
     });
     return existingKeys.has(entry.key) ? [] : [{ marker, entry }];
   });
-  const capacity = Math.max(0, stateMaxEntries - existingEntries.length);
+  const namespaceCapacity = Math.max(0, stateMaxEntries - existingEntries.length);
+  const pluginCapacity =
+    missingEntries.length > 0 ? params.io.context.getPluginStateCapacity?.() : undefined;
+  if (missingEntries.length > 0 && !pluginCapacity) {
+    throw new Error("plugin-wide Matrix inbound dedupe import capacity is unavailable");
+  }
+  const pluginRemainingCapacity = pluginCapacity
+    ? Math.max(0, pluginCapacity.maxEntries - pluginCapacity.liveEntries)
+    : namespaceCapacity;
+  const capacity = Math.min(namespaceCapacity, pluginRemainingCapacity);
   const selectedEntries = missingEntries.slice(0, capacity);
   if (selectedEntries.length > 0) {
     const importEntries = params.io.context.importPluginStateEntries;

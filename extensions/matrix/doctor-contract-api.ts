@@ -58,6 +58,7 @@ import {
   readLegacyInboundDedupeJsonSource,
   readLegacyInboundDedupeSqliteSource,
   recordMatrixInboundDedupeMigrationCompletion,
+  reserveMatrixInboundDedupeMigrationCompletion,
   retireLegacyInboundDedupeSqliteRows,
   verifyMatrixInboundDedupeSourcesRetired,
   type LegacyInboundDedupeMarker,
@@ -318,6 +319,14 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
       const changes: string[] = [];
       const warnings: string[] = [];
       if (await hasCompletedMatrixInboundDedupeMigration(params.context, params.env)) {
+        return { changes, warnings };
+      }
+      try {
+        await reserveMatrixInboundDedupeMigrationCompletion(params.context, params.env);
+      } catch (err) {
+        warnings.push(
+          `Failed reserving Matrix inbound dedupe migration completion: ${String(err)}; left legacy sources in place`,
+        );
         return { changes, warnings };
       }
       const sources = await collectMatrixInboundDedupeSources(params.stateDir);
