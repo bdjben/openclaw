@@ -16,12 +16,12 @@ import {
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { PluginDoctorStateMigrationContext } from "openclaw/plugin-sdk/runtime-doctor";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { stateMigrations } from "./doctor-contract-api.js";
 import {
   MATRIX_INBOUND_DEDUPE_TTL_MS,
   resolveMatrixInboundDedupeStateNamespace,
 } from "./src/matrix/monitor/inbound-dedupe.js";
+import { useAutoCleanupTempDirTracker } from "./test-support.js";
 
 function createMigrationParams(stateDir: string) {
   const env = { OPENCLAW_STATE_DIR: stateDir };

@@ -22,7 +22,6 @@ import {
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { PluginDoctorStateMigrationContext } from "openclaw/plugin-sdk/runtime-doctor";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { stateMigrations } from "./doctor-contract-api.js";
 import { SqliteBackedMatrixSyncStore } from "./src/matrix/client/file-sync-store.js";
 import { openMatrixStorageMetaStoreOptions } from "./src/matrix/client/storage.js";
@@ -55,6 +54,7 @@ import {
   readDatabaseRecords,
 } from "./src/matrix/sdk/idb-persistence.test-helpers.js";
 import { installMatrixTestRuntime } from "./src/test-runtime.js";
+import { useAutoCleanupTempDirTracker } from "./test-support.js";
 
 const DOCTOR_IDB_DATABASE_PREFIX = "openclaw-matrix-doctor-test";
 
