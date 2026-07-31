@@ -88,8 +88,8 @@ export function stripThoughtSignatures<T>(
 
 const DEFAULT_BOOTSTRAP_MAX_CHARS = 20_000;
 const DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 60_000;
-// USER.md stays directive-sized by default, while an explicit operator-selected
-// bootstrapMaxChars above this floor remains authoritative.
+// USER.md stays directive-sized by default, while an explicit effective
+// bootstrapMaxChars remains authoritative.
 export const USER_BOOTSTRAP_MAX_CHARS = 4_000;
 const DEFAULT_BOOTSTRAP_PROMPT_TRUNCATION_WARNING_MODE = "always";
 const MIN_BOOTSTRAP_FILE_BUDGET_CHARS = 64;
@@ -139,14 +139,12 @@ export function resolveUserBootstrapMaxChars(
   cfg?: OpenClawConfig,
   agentId?: string | null,
 ): number {
-  const agentMaxChars =
+  const raw =
     cfg && agentId
-      ? normalizeConfiguredBootstrapLimit(resolveAgentConfig(cfg, agentId)?.bootstrapMaxChars)
-      : undefined;
-  const defaultMaxChars = normalizeConfiguredBootstrapLimit(
-    cfg?.agents?.defaults?.bootstrapMaxChars,
-  );
-  return Math.max(USER_BOOTSTRAP_MAX_CHARS, agentMaxChars ?? 0, defaultMaxChars ?? 0);
+      ? (resolveAgentConfig(cfg, agentId)?.bootstrapMaxChars ??
+        cfg.agents?.defaults?.bootstrapMaxChars)
+      : cfg?.agents?.defaults?.bootstrapMaxChars;
+  return normalizeConfiguredBootstrapLimit(raw) ?? USER_BOOTSTRAP_MAX_CHARS;
 }
 
 export function resolveBootstrapTotalMaxChars(

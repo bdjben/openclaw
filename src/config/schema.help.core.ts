@@ -254,7 +254,7 @@ export const CORE_FIELD_HELP: Record<string, string> = {
   "agents.entries.*.contextInjection":
     "Per-agent override for when workspace bootstrap files are injected into this agent's system prompt. Omit to inherit agents.defaults.contextInjection.",
   "agents.entries.*.bootstrapMaxChars":
-    "Per-agent max characters for each workspace bootstrap file injected into this agent's system prompt. USER.md keeps a 4000-character default unless this value or agents.defaults.bootstrapMaxChars is higher.",
+    "Per-agent max characters for each workspace bootstrap file injected into this agent's system prompt. USER.md uses this value when present, then agents.defaults.bootstrapMaxChars, then its 4000-character default.",
   "agents.entries.*.bootstrapTotalMaxChars":
     "Per-agent override for max total characters across all workspace bootstrap files injected into this agent's system prompt. Omit to inherit agents.defaults.bootstrapTotalMaxChars.",
   "agents.entries.*.experimental":

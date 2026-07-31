@@ -381,23 +381,26 @@ describe("bootstrap limit resolvers", () => {
 });
 
 describe("resolveUserBootstrapMaxChars", () => {
-  it("uses 4000 when no higher limit is explicitly configured", () => {
+  it("uses 4000 when no limit is explicitly configured", () => {
     expect(resolveUserBootstrapMaxChars()).toBe(4_000);
   });
 
-  it("uses the highest explicit agent or default limit", () => {
+  it("uses the agent override before the default limit", () => {
     const cfg = {
       agents: {
         defaults: { bootstrapMaxChars: 12_000 },
         entries: {
           worker: { bootstrapMaxChars: 8_000 },
           larger: { bootstrapMaxChars: 16_000 },
+          smaller: { bootstrapMaxChars: 2_000 },
         },
       },
     } as OpenClawConfig;
 
-    expect(resolveUserBootstrapMaxChars(cfg, "worker")).toBe(12_000);
+    expect(resolveUserBootstrapMaxChars(cfg, "missing")).toBe(12_000);
+    expect(resolveUserBootstrapMaxChars(cfg, "worker")).toBe(8_000);
     expect(resolveUserBootstrapMaxChars(cfg, "larger")).toBe(16_000);
+    expect(resolveUserBootstrapMaxChars(cfg, "smaller")).toBe(2_000);
   });
 });
 

@@ -121,7 +121,7 @@ By default, OpenClaw injects a fixed set of workspace files (if present):
 - `USER.md`
 - `BOOTSTRAP.md` (first-run only)
 
-Large files are truncated per-file using `agents.defaults.bootstrapMaxChars` (default `20000` chars). `USER.md` uses a 4,000-character default unless an explicit default or per-agent `bootstrapMaxChars` setting is higher. OpenClaw also enforces a total bootstrap injection cap across files with `agents.defaults.bootstrapTotalMaxChars` (default `60000` chars). `/context` shows **raw vs injected** sizes and whether truncation happened.
+Large files are truncated per-file using `agents.defaults.bootstrapMaxChars` (default `20000` chars). `USER.md` uses a 4,000-character default when neither scope configures `bootstrapMaxChars`; otherwise it uses the per-agent value when present, then the configured default. OpenClaw also enforces a total bootstrap injection cap across files with `agents.defaults.bootstrapTotalMaxChars` (default `60000` chars). `/context` shows **raw vs injected** sizes and whether truncation happened.
 
 When truncation occurs, the runtime can inject an in-prompt warning block under Project Context. Configure this with `agents.defaults.bootstrapPromptTruncationWarning` (`off`, `once`, `always`; default `always`).
 

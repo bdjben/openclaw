@@ -11,6 +11,7 @@ const listAgentIds = vi.hoisted(() => vi.fn(() => ["main"]));
 const resolveBootstrapContextForRun = vi.hoisted(() => vi.fn());
 const resolveBootstrapMaxChars = vi.hoisted(() => vi.fn(() => 20_000));
 const resolveBootstrapTotalMaxChars = vi.hoisted(() => vi.fn(() => 150_000));
+const resolveUserBootstrapMaxChars = vi.hoisted(() => vi.fn(() => 4_000));
 
 vi.mock("../../packages/terminal-core/src/note.js", () => ({
   note,
@@ -29,6 +30,7 @@ vi.mock("../agents/bootstrap-files.js", () => ({
 vi.mock("../agents/embedded-agent-helpers.js", () => ({
   resolveBootstrapMaxChars,
   resolveBootstrapTotalMaxChars,
+  resolveUserBootstrapMaxChars,
 }));
 
 import { noteBootstrapFileSize } from "./doctor-bootstrap-size.js";

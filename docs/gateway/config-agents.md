@@ -115,9 +115,8 @@ Per-agent override: `agents.entries.*.bootstrapMaxChars`. Omitted values inherit
 `agents.defaults.bootstrapMaxChars`.
 
 `USER.md` uses a 4,000-character default when neither setting is explicitly
-higher. When `agents.defaults.bootstrapMaxChars` or the agent's
-`agents.entries.*.bootstrapMaxChars` is set above `4000`, the highest configured
-value applies to `USER.md`.
+configured. Otherwise, the agent's `agents.entries.*.bootstrapMaxChars` value
+takes precedence when present, then `agents.defaults.bootstrapMaxChars`.
 
 ### `agents.defaults.bootstrapTotalMaxChars`
 

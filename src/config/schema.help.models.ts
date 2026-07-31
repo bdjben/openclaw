@@ -162,7 +162,7 @@ export const MODEL_FIELD_HELP: Record<string, string> = {
   "agents.defaults.contextInjection":
     'Controls when workspace bootstrap files are injected into the system prompt: "always" (default) or "continuation-skip" for safe continuation turns after a completed assistant response.',
   "agents.defaults.bootstrapMaxChars":
-    "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 20000). USER.md uses 4000 unless this value or its agent override is explicitly higher.",
+    "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 20000). USER.md uses an explicit agent override first, then this configured value, then 4000.",
   "agents.defaults.bootstrapTotalMaxChars":
     "Max total characters across all injected workspace bootstrap files (default: 60000).",
   "agents.defaults.experimental":
