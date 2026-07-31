@@ -19,6 +19,8 @@ vi.mock("../../daemon/diagnostics.js", () => ({
 }));
 vi.mock("../../gateway/net.js", () => ({
   resolveGatewayBindHost: mocks.resolveGatewayBindHost,
+  resolveGatewayRequiredListenHosts: (bindHost: string) =>
+    bindHost === "100.64.0.40" ? [bindHost, "127.0.0.1"] : [bindHost],
 }));
 vi.mock("../../infra/ports.js", () => ({ inspectPortUsage: mocks.inspectPortUsage }));
 vi.mock("../../infra/restart-sentinel.js", () => ({ readRestartSentinel: async () => null }));

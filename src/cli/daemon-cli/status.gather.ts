@@ -25,6 +25,7 @@ import { resolveGatewayService } from "../../daemon/service.js";
 import { resolveAdvertisedControlUiLinks } from "../../gateway/control-ui-links.js";
 import { gatewaySecretInputPathCanWin } from "../../gateway/credentials-secret-inputs.js";
 import { trimToUndefined } from "../../gateway/credentials.js";
+import { resolveGatewayRequiredListenHosts } from "../../gateway/net.js";
 import { resolveGatewayProbeCredentialConfig } from "../../gateway/probe-auth.js";
 import {
   ALL_GATEWAY_SECRET_INPUT_PATHS,
@@ -497,7 +498,7 @@ async function inspectDaemonPortStatuses(params: {
   cliPort: number;
   daemonBindHost: string;
 }): Promise<{ portStatus?: PortStatusSummary; portCliStatus?: PortStatusSummary }> {
-  const daemonProbeHosts = [params.daemonBindHost];
+  const daemonProbeHosts = resolveGatewayRequiredListenHosts(params.daemonBindHost);
   if (params.cliPort === params.daemonPort) {
     const portDiagnostics = await inspectPortUsage(params.daemonPort, {
       probeHosts: daemonProbeHosts,
@@ -731,7 +732,7 @@ export async function gatherDaemonStatus(
               service,
               port: daemonPort,
               env: serviceEnv,
-              probeHosts: [gateway.bindHost],
+              probeHosts: resolveGatewayRequiredListenHosts(gateway.bindHost),
             }),
           )
           .catch(() => undefined)

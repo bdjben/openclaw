@@ -99,6 +99,8 @@ vi.mock("../daemon/systemd.js", async () => {
 
 vi.mock("../gateway/net.js", () => ({
   resolveGatewayBindHost,
+  resolveGatewayRequiredListenHosts: (bindHost: string) =>
+    bindHost === "100.64.0.40" ? [bindHost, "127.0.0.1"] : [bindHost],
 }));
 
 vi.mock("../infra/ports.js", () => ({

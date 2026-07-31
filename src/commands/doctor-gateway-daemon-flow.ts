@@ -19,7 +19,7 @@ import type { GatewayServiceRuntime } from "../daemon/service-runtime.js";
 import { describeGatewayServiceRestart, resolveGatewayService } from "../daemon/service.js";
 import { renderSystemdUnavailableHints } from "../daemon/systemd-hints.js";
 import { isSystemdUserServiceAvailable } from "../daemon/systemd.js";
-import { resolveGatewayBindHost } from "../gateway/net.js";
+import { resolveGatewayBindHost, resolveGatewayRequiredListenHosts } from "../gateway/net.js";
 import { NON_DEFAULT_INSTALL_SERVICE_SKIP_REASON } from "../infra/gateway-supervision.js";
 import {
   formatPortDiagnostics,
@@ -314,7 +314,9 @@ export async function maybeRepairGatewayDaemon(params: {
       params.cfg.gateway?.bind ?? "loopback",
       params.cfg.gateway?.customBindHost,
     );
-    const diagnostics = await inspectPortUsage(port, { probeHosts: [bindHost] });
+    const diagnostics = await inspectPortUsage(port, {
+      probeHosts: resolveGatewayRequiredListenHosts(bindHost),
+    });
     await maybeReportEstablishedGatewayClients({
       cfg: params.cfg,
       deep: params.options.deep ?? false,

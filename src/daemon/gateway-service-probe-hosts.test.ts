@@ -20,6 +20,8 @@ vi.mock("../config/io.js", () => ({
 
 vi.mock("../gateway/net.js", () => ({
   defaultGatewayBindMode: (tailscaleMode?: string) => mocks.defaultGatewayBindMode(tailscaleMode),
+  resolveGatewayRequiredListenHosts: (bindHost: string) =>
+    bindHost === "192.0.2.40" || bindHost === "100.64.0.40" ? [bindHost, "127.0.0.1"] : [bindHost],
 }));
 
 vi.mock("../infra/container-environment.js", () => ({
@@ -52,7 +54,7 @@ describe("resolveGatewayServiceProbeHosts", () => {
       name: "custom",
       gateway: { bind: "custom" as const, customBindHost: "192.0.2.40" },
       tailnetIPv4: undefined,
-      expected: ["192.0.2.40"],
+      expected: ["192.0.2.40", "127.0.0.1"],
     },
     {
       name: "LAN wildcard",
@@ -64,7 +66,7 @@ describe("resolveGatewayServiceProbeHosts", () => {
       name: "tailnet",
       gateway: { bind: "tailnet" as const },
       tailnetIPv4: "100.64.0.40",
-      expected: ["100.64.0.40"],
+      expected: ["100.64.0.40", "127.0.0.1"],
     },
   ])(
     "returns the configured $name endpoint without a bind-availability probe",

@@ -231,6 +231,10 @@ vi.mock("../../daemon/service.js", () => ({
 vi.mock("../../gateway/net.js", () => ({
   resolveGatewayBindHost: (bindMode: string, customBindHost?: string) =>
     resolveGatewayBindHost(bindMode, customBindHost),
+  resolveGatewayRequiredListenHosts: (bindHost: string) =>
+    /^\d+\.\d+\.\d+\.\d+$/.test(bindHost) && bindHost !== "0.0.0.0" && bindHost !== "127.0.0.1"
+      ? [bindHost, "127.0.0.1"]
+      : [bindHost],
 }));
 
 vi.mock("../../gateway/control-ui-links.js", () => ({

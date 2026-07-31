@@ -1,6 +1,6 @@
 import { createConfigIO } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { defaultGatewayBindMode } from "../gateway/net.js";
+import { defaultGatewayBindMode, resolveGatewayRequiredListenHosts } from "../gateway/net.js";
 import { isContainerEnvironment } from "../infra/container-environment.js";
 import { LOOPBACK_PORT_PROBE_HOSTS } from "../infra/ports-probe.js";
 import { pickPrimaryTailnetIPv4 } from "../infra/tailnet.js";
@@ -32,5 +32,5 @@ export async function resolveGatewayServiceProbeHosts(params: {
           : bindMode === "auto" && isContainerEnvironment()
             ? "0.0.0.0"
             : LOOPBACK_PORT_PROBE_HOSTS[0];
-  return [bindHost];
+  return resolveGatewayRequiredListenHosts(bindHost);
 }
