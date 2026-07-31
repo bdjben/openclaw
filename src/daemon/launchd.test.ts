@@ -104,7 +104,7 @@ const probePortUsage = vi.hoisted(() =>
 );
 const formatPortDiagnostics = vi.hoisted(() => vi.fn(() => ["Port 18789 is already in use."]));
 const resolveGatewayServiceProbeHosts = vi.hoisted(() =>
-  vi.fn(async () => ["127.0.0.1"] as readonly string[]),
+  vi.fn<(_params?: unknown) => Promise<readonly string[]>>(async () => ["127.0.0.1"]),
 );
 const defaultProgramArguments = ["node", "-e", "process.exit(0)"];
 

@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
     };
   },
   createConfigIO: vi.fn(),
-  defaultGatewayBindMode: vi.fn(() => "loopback" as const),
+  defaultGatewayBindMode: vi.fn<(_tailscaleMode?: string) => "loopback" | "auto">(() => "loopback"),
   isContainerEnvironment: vi.fn(() => false),
   pickPrimaryTailnetIPv4: vi.fn<() => string | undefined>(() => undefined),
 }));

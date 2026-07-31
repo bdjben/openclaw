@@ -87,9 +87,15 @@ export async function inspectGatewayRestart(params: {
   expectedVersion?: string | null;
   includeUnknownListenersAsStale?: boolean;
   probeAuth?: GatewayRestartProbeAuth;
-  probeHosts: readonly string[];
+  probeHosts?: readonly string[];
 }): Promise<GatewayRestartSnapshot> {
   const env = params.env ?? process.env;
+  const probeHosts =
+    params.probeHosts ??
+    (await resolveGatewayServiceProbeHosts({
+      env,
+      command: (await params.service.readCommand?.(env).catch(() => null)) ?? null,
+    }));
   const expectedVersion = normalizeOptionalString(params.expectedVersion);
   let reachability: GatewayReachability | null = null;
   let activatedPluginErrors: PluginHealthErrorSummary[] = [];
@@ -117,7 +123,7 @@ export async function inspectGatewayRestart(params: {
   let portUsage: PortUsage;
   try {
     portUsage = await inspectPortUsage(params.port, {
-      probeHosts: params.probeHosts,
+      probeHosts,
     });
   } catch (err) {
     portUsage = {

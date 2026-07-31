@@ -315,13 +315,13 @@ describe("restart health", () => {
     });
 
     const { inspectGatewayRestart } = await import("./restart-health.js");
-    const snapshot = await inspectGatewayRestart({
-      service,
-      port: 18789,
-      probeHosts: ["127.0.0.1"],
-    });
+    const snapshot = await inspectGatewayRestart({ service, port: 18789 });
 
     expect(snapshot.healthy).toBe(true);
     expect(probeGateway).not.toHaveBeenCalled();
+    expect(resolveGatewayServiceProbeHosts).toHaveBeenCalledWith({
+      env: process.env,
+      command: null,
+    });
   });
 });
