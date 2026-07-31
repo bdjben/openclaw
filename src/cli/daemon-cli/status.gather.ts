@@ -731,6 +731,7 @@ export async function gatherDaemonStatus(
               service,
               port: daemonPort,
               env: serviceEnv,
+              probeHosts: [gateway.bindHost],
             }),
           )
           .catch(() => undefined)

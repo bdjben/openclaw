@@ -44,7 +44,7 @@ async function listenServer(
     });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "EPERM" || code === "EACCES") {
+    if (code === "EPERM" || code === "EACCES" || code === "EADDRNOTAVAIL") {
       return null;
     }
     throw err;

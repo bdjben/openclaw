@@ -14,7 +14,10 @@ async function withListeningServer(
       server.listen(0, host, () => resolve());
     });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EPERM") {
+    if (
+      (err as NodeJS.ErrnoException).code === "EPERM" ||
+      (err as NodeJS.ErrnoException).code === "EADDRNOTAVAIL"
+    ) {
       return;
     }
     throw err;

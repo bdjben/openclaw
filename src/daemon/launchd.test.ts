@@ -103,6 +103,9 @@ const probePortUsage = vi.hoisted(() =>
   vi.fn<typeof import("../infra/ports-probe.js").probePortUsage>(async () => "free"),
 );
 const formatPortDiagnostics = vi.hoisted(() => vi.fn(() => ["Port 18789 is already in use."]));
+const resolveGatewayServiceProbeHosts = vi.hoisted(() =>
+  vi.fn(async () => ["127.0.0.1"] as readonly string[]),
+);
 const defaultProgramArguments = ["node", "-e", "process.exit(0)"];
 
 function countMatching<T>(items: readonly T[], predicate: (item: T) => boolean): number {
@@ -409,6 +412,10 @@ vi.mock("../infra/ports-probe.js", () => ({
   probePortUsage,
 }));
 
+vi.mock("./gateway-service-probe-hosts.js", () => ({
+  resolveGatewayServiceProbeHosts: (params: unknown) => resolveGatewayServiceProbeHosts(params),
+}));
+
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   const wrapped = {
@@ -532,6 +539,8 @@ beforeEach(() => {
   probePortUsage.mockResolvedValue("free");
   formatPortDiagnostics.mockReset();
   formatPortDiagnostics.mockReturnValue(["Port 18789 is already in use."]);
+  resolveGatewayServiceProbeHosts.mockReset();
+  resolveGatewayServiceProbeHosts.mockResolvedValue(["127.0.0.1"]);
   launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff.mockReset();
   launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff.mockReturnValue({
     ok: true,
@@ -1944,6 +1953,27 @@ describe("launchd install", () => {
 
     expect(inspectPortUsage).toHaveBeenCalledTimes(1);
     expect(probePortUsage).toHaveBeenCalledWith(19009, ["127.0.0.1"]);
+  });
+
+  it("waits on the configured non-loopback host before reporting the port released", async () => {
+    const env = {
+      ...createDefaultLaunchdEnv(),
+      OPENCLAW_GATEWAY_PORT: "19011",
+    };
+    resolveGatewayServiceProbeHosts.mockResolvedValue(["192.0.2.40"]);
+    inspectPortUsage.mockResolvedValueOnce({
+      port: 19011,
+      status: "busy",
+      listeners: [],
+      hints: [],
+    });
+
+    await runStopLaunchAgentWithFakeTimers({ env, stdout: new PassThrough() });
+
+    expect(inspectPortUsage).toHaveBeenCalledWith(19011, {
+      probeHosts: ["192.0.2.40"],
+    });
+    expect(probePortUsage).toHaveBeenCalledWith(19011, ["192.0.2.40"]);
   });
 
   it("keeps waiting until a bind probe explicitly confirms port release", async () => {
