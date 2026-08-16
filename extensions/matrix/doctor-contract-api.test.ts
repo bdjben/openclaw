@@ -181,6 +181,57 @@ describe("matrix doctor contract state migrations", () => {
     expect(fs.existsSync(`${filePath}.migrated`)).toBe(true);
   });
 
+  it("keeps canonical SQLite credentials and archives a differing legacy source", async () => {
+    const stateDir = tempDirs.make("openclaw-matrix-doctor-");
+    const credentialsDir = path.join(stateDir, "credentials", "matrix");
+    const filePath = path.join(credentialsDir, "credentials-agent1.json");
+    fs.mkdirSync(credentialsDir, { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        homeserver: "https://matrix.example.org",
+        userId: "@agent1:example.org",
+        accessToken: "legacy-token",
+        deviceId: "LEGACYDEVICE",
+        createdAt: "2026-07-02T12:00:00.000Z",
+      }),
+    );
+    const params = createMigrationParams(stateDir);
+    const credentialStore = params.context.openPluginStateKeyedStore<MatrixCredentialStateRecord>({
+      namespace: MATRIX_CREDENTIALS_NAMESPACE,
+      maxEntries: MATRIX_CREDENTIALS_MAX_ENTRIES,
+      overflowPolicy: "reject-new",
+    });
+    const canonical: MatrixStoredCredentialRecord = {
+      accountId: "agent1",
+      homeserver: "https://matrix.example.org",
+      userId: "@agent1:example.org",
+      accessToken: "canonical-token",
+      deviceId: "CANONICALDEVICE",
+      createdAt: "2026-07-01T12:00:00.000Z",
+    };
+    await credentialStore.register(matrixCredentialsStoreKey("agent1"), canonical);
+
+    const result = await migrationById(
+      "matrix-credentials-json-to-plugin-state",
+    ).migrateLegacyState(params);
+
+    expect(result.warnings).toEqual([]);
+    expect(result.changes).toEqual([
+      "Kept existing Matrix credentials for account agent1",
+      expect.stringContaining("Archived Matrix credentials legacy source"),
+    ]);
+    await expect(credentialStore.lookup(matrixCredentialsStoreKey("agent1"))).resolves.toEqual(
+      canonical,
+    );
+    expect(fs.existsSync(filePath)).toBe(false);
+    expect(fs.existsSync(`${filePath}.migrated`)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(`${filePath}.migrated`, "utf8"))).toMatchObject({
+      accessToken: "legacy-token",
+      deviceId: "LEGACYDEVICE",
+    });
+  });
+
   it("migrates legacy sync cache JSON to SQLite plugin state", async () => {
     const stateDir = tempDirs.make("openclaw-matrix-doctor-");
     const storageRootDir = path.join(
