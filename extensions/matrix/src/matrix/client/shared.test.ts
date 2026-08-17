@@ -558,15 +558,18 @@ describe("shared Matrix client generations", () => {
     await replacement.release();
   });
 
-  it("poisons a timed-out generation, discards final state, and never reopens it automatically", async () => {
+  it("discards a timed-out generation and lets a later acquisition create a fresh client", async () => {
     const cause = new Error("Matrix classic sync did not reach STOPPED within 5000ms");
     const callOrder: string[] = [];
-    const client = createMockClient("main", callOrder);
-    client.quiesceSync.mockImplementation(async () => {
+    const timedOutClient = createMockClient("timed-out", callOrder);
+    const replacementClient = createMockClient("replacement");
+    timedOutClient.quiesceSync.mockImplementation(async () => {
       callOrder.push("quiesce");
       throw cause;
     });
-    createMatrixClientMock.mockResolvedValue(client);
+    createMatrixClientMock
+      .mockResolvedValueOnce(timedOutClient)
+      .mockResolvedValueOnce(replacementClient);
     const auth = authFor("main");
     const monitor = await acquireSharedMatrixClient({
       auth,
@@ -592,10 +595,13 @@ describe("shared Matrix client generations", () => {
 
     await expect(transient.release()).rejects.toBe(cause);
     expect(await releaseError).toBe(cause);
-    expect(client.stopWithoutPersist).toHaveBeenCalledTimes(1);
-    expect(client.stopAndPersist).not.toHaveBeenCalled();
-    await expect(acquireSharedMatrixClient({ auth })).rejects.toBe(cause);
-    expect(createMatrixClientMock).toHaveBeenCalledTimes(1);
+    expect(timedOutClient.stopWithoutPersist).toHaveBeenCalledTimes(1);
+    expect(timedOutClient.stopAndPersist).not.toHaveBeenCalled();
+
+    const replacement = await acquireSharedMatrixClient({ auth, startClient: false });
+    expect(replacement.client).toBe(replacementClient);
+    expect(createMatrixClientMock).toHaveBeenCalledTimes(2);
+    await replacement.release({ mode: "discard" });
   });
 
   it("preserves an earlier stop requirement when the final lease requests discard", async () => {

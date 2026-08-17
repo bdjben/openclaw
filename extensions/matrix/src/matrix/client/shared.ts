@@ -368,10 +368,14 @@ function beginGenerationRetirement(params: {
     }
 
     if (state.poisonError) {
-      await state.client
-        .drainPendingDecryptions("matrix poisoned client shutdown")
-        .catch(() => undefined);
-      state.client.stopWithoutPersist();
+      try {
+        await state.client
+          .drainPendingDecryptions("matrix poisoned client shutdown")
+          .catch(() => undefined);
+        state.client.stopWithoutPersist();
+      } finally {
+        deleteSharedClientState(state);
+      }
       throw state.poisonError;
     }
 

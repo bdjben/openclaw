@@ -1532,6 +1532,66 @@ describe("MatrixClient request hardening", () => {
     expect(emitter.listenerCount("sync.state")).toBe(listenerCountBefore);
   });
 
+  it.each([SyncState.Error, SyncState.Reconnecting])(
+    "accepts protected sync stop from the SDK %s keepalive path without a STOPPED event",
+    async (syncState) => {
+      vi.useFakeTimers();
+      const client = new MatrixClient("https://matrix.example.org", "token");
+      await client.start();
+      vi.spyOn(matrixJsClient.syncApi, "getSyncState").mockReturnValue(syncState);
+      const keepalive = Promise.withResolvers<boolean>();
+      const keepaliveRejection = keepalive.promise.catch((error: unknown) => error);
+      const syncInternals = matrixJsClient.syncApi as SyncApi & {
+        connectionReturnedResolvers?: typeof keepalive;
+      };
+      syncInternals.connectionReturnedResolvers = keepalive;
+      matrixJsClient.classicSyncStop.mockImplementation(() => {});
+
+      const outcome = client.quiesceSync().then(
+        () => "resolved",
+        () => "rejected",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(Promise.race([outcome, Promise.resolve("pending")])).resolves.toBe("resolved");
+      expect(matrixJsClient.classicSyncStop).toHaveBeenCalledTimes(1);
+      await expect(keepaliveRejection).resolves.toBe("SyncApi.stop() was called");
+      expect(syncInternals.connectionReturnedResolvers).toBeUndefined();
+      expect(matrixJsClient.stopClient).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+
+      await client.stopAndPersist();
+      expect(matrixJsClient.classicSyncStop).toHaveBeenCalledTimes(1);
+      expect(matrixJsClient.stopClient).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("does not clear a keepalive resolver replaced during protected sync stop", async () => {
+    const client = new MatrixClient("https://matrix.example.org", "token");
+    await client.start();
+    vi.spyOn(matrixJsClient.syncApi, "getSyncState").mockReturnValue(SyncState.Error);
+    const captured = Promise.withResolvers<boolean>();
+    const replacement = Promise.withResolvers<boolean>();
+    const syncInternals = matrixJsClient.syncApi as SyncApi & {
+      connectionReturnedResolvers?: typeof captured;
+    };
+    syncInternals.connectionReturnedResolvers = captured;
+    matrixJsClient.classicSyncStop.mockImplementation(() => {
+      syncInternals.connectionReturnedResolvers = replacement;
+      queueMicrotask(() => {
+        matrixJsClient.emit("sync", SyncState.Stopped, SyncState.Error, undefined);
+      });
+    });
+
+    await client.quiesceSync();
+
+    expect(syncInternals.connectionReturnedResolvers).toBe(replacement);
+    captured.resolve(false);
+    replacement.resolve(false);
+    syncInternals.connectionReturnedResolvers = undefined;
+  });
+
   it("stops classic sync created by a partial startup before readiness", async () => {
     const client = new MatrixClient("https://matrix.example.org", "token");
     const abortController = new AbortController();
@@ -1550,7 +1610,10 @@ describe("MatrixClient request hardening", () => {
     expect(matrixJsClient.stopClient).not.toHaveBeenCalled();
   });
 
-  it("times out classic sync quiesce without public stop and removes its waiter", async () => {
+  it.each([
+    { label: "active SYNCING", state: SyncState.Syncing },
+    { label: "stale ERROR", state: SyncState.Error },
+  ])("times out $label quiesce without public stop and discards its cursor", async ({ state }) => {
     vi.useFakeTimers();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-matrix-sync-timeout-"));
     try {
@@ -1558,11 +1621,23 @@ describe("MatrixClient request hardening", () => {
         storageRootDir: tempDir,
       });
       await client.start();
+      vi.spyOn(matrixJsClient.syncApi, "getSyncState").mockReturnValue(state);
+      const syncInternals = matrixJsClient.syncApi as SyncApi & {
+        connectionReturnedResolvers?: unknown;
+      };
+      expect(syncInternals.connectionReturnedResolvers).toBeUndefined();
       const emitter = (
         client as unknown as {
           emitter: EventEmitter;
         }
       ).emitter;
+      const store = lastCreateClientOpts?.store as
+        | { discardPendingSyncCursorPersistence: () => void }
+        | undefined;
+      if (!store) {
+        throw new Error("expected Matrix sync store");
+      }
+      const discardSpy = vi.spyOn(store, "discardPendingSyncCursorPersistence");
       const listenerCountBefore = emitter.listenerCount("sync.state");
       matrixJsClient.classicSyncStop.mockImplementation(() => {});
 
@@ -1572,8 +1647,14 @@ describe("MatrixClient request hardening", () => {
       );
       await vi.advanceTimersByTimeAsync(5_000);
       await rejection;
+      await expect(client.quiesceSync()).rejects.toThrow(
+        "Matrix classic sync did not reach STOPPED within 5000ms",
+      );
 
+      expect(syncInternals.connectionReturnedResolvers).toBeUndefined();
+      expect(matrixJsClient.classicSyncStop).toHaveBeenCalledTimes(1);
       expect(matrixJsClient.stopClient).not.toHaveBeenCalled();
+      expect(discardSpy).toHaveBeenCalledTimes(1);
       expect(emitter.listenerCount("sync.state")).toBe(listenerCountBefore);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
