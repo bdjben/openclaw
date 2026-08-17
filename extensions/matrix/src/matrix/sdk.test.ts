@@ -10,6 +10,7 @@ import { MatrixError } from "matrix-js-sdk/lib/http-api/errors.js";
 import { type MatrixEvent, MsgType } from "matrix-js-sdk/lib/matrix.js";
 import { EventStatus } from "matrix-js-sdk/lib/models/event-status.js";
 import { SyncApi, SyncState } from "matrix-js-sdk/lib/sync.js";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 // Matrix tests cover sdk plugin behavior.
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
@@ -19,6 +20,15 @@ import { readMatrixRecoveryKeyStateForPath } from "./crypto-state-store.js";
 import { MatrixDecryptBridge } from "./sdk/decrypt-bridge.js";
 
 const requireMatrixJsSdkPackage = createRequire(import.meta.url);
+
+type MatrixSyncApiTestInternals = {
+  connectionReturnedResolvers?: ReturnType<typeof createDeferred<boolean>>;
+};
+
+function requireMatrixSyncApiTestInternals(syncApi: unknown): MatrixSyncApiTestInternals {
+  // SAFETY: the test stub intentionally models the pinned SDK's private resolver field.
+  return syncApi as MatrixSyncApiTestInternals;
+}
 
 function requestUrl(input: RequestInfo | URL | undefined): string {
   if (!input) {
@@ -1539,11 +1549,9 @@ describe("MatrixClient request hardening", () => {
       const client = new MatrixClient("https://matrix.example.org", "token");
       await client.start();
       vi.spyOn(matrixJsClient.syncApi, "getSyncState").mockReturnValue(syncState);
-      const keepalive = Promise.withResolvers<boolean>();
+      const keepalive = createDeferred<boolean>();
       const keepaliveRejection = keepalive.promise.catch((error: unknown) => error);
-      const syncInternals = matrixJsClient.syncApi as SyncApi & {
-        connectionReturnedResolvers?: typeof keepalive;
-      };
+      const syncInternals = requireMatrixSyncApiTestInternals(matrixJsClient.syncApi);
       syncInternals.connectionReturnedResolvers = keepalive;
       matrixJsClient.classicSyncStop.mockImplementation(() => {});
 
@@ -1571,11 +1579,9 @@ describe("MatrixClient request hardening", () => {
     const client = new MatrixClient("https://matrix.example.org", "token");
     await client.start();
     vi.spyOn(matrixJsClient.syncApi, "getSyncState").mockReturnValue(SyncState.Error);
-    const captured = Promise.withResolvers<boolean>();
-    const replacement = Promise.withResolvers<boolean>();
-    const syncInternals = matrixJsClient.syncApi as SyncApi & {
-      connectionReturnedResolvers?: typeof captured;
-    };
+    const captured = createDeferred<boolean>();
+    const replacement = createDeferred<boolean>();
+    const syncInternals = requireMatrixSyncApiTestInternals(matrixJsClient.syncApi);
     syncInternals.connectionReturnedResolvers = captured;
     matrixJsClient.classicSyncStop.mockImplementation(() => {
       syncInternals.connectionReturnedResolvers = replacement;
@@ -1622,9 +1628,7 @@ describe("MatrixClient request hardening", () => {
       });
       await client.start();
       vi.spyOn(matrixJsClient.syncApi, "getSyncState").mockReturnValue(state);
-      const syncInternals = matrixJsClient.syncApi as SyncApi & {
-        connectionReturnedResolvers?: unknown;
-      };
+      const syncInternals = requireMatrixSyncApiTestInternals(matrixJsClient.syncApi);
       expect(syncInternals.connectionReturnedResolvers).toBeUndefined();
       const emitter = (
         client as unknown as {

@@ -10,9 +10,14 @@ const MATRIX_JS_SDK_SYNC_VERSION = "41.9.0";
 const matrixJsSdkPackage = createRequire(import.meta.url)("matrix-js-sdk/package.json") as {
   version?: unknown;
 };
-type MatrixClassicSyncInternals = SyncApi & {
+type MatrixClassicSyncInternals = {
   connectionReturnedResolvers?: { reject: (reason?: unknown) => void };
 };
+
+function requireMatrixClassicSyncInternals(syncApi: unknown): MatrixClassicSyncInternals {
+  // SAFETY: the caller asserts the exact matrix-js-sdk version before using this private shape.
+  return syncApi as MatrixClassicSyncInternals;
+}
 
 function assertMatrixJsSdkSyncVersion(): void {
   const version = matrixJsSdkPackage.version;
@@ -61,9 +66,7 @@ export async function quiesceMatrixClientSync(params: {
   }
   const disconnectedBeforeStop =
     syncState === SyncState.Error || syncState === SyncState.Reconnecting;
-  // SAFETY: the exact matrix-js-sdk version is asserted above before accessing
-  // the pinned classic-sync keepalive resolver used by SyncApi.stop().
-  const syncInternals = syncApi as MatrixClassicSyncInternals;
+  const syncInternals = requireMatrixClassicSyncInternals(syncApi);
   const keepaliveResolvers = disconnectedBeforeStop
     ? syncInternals.connectionReturnedResolvers
     : undefined;
