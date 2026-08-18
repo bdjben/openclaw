@@ -32,7 +32,7 @@ const oauthMocks = vi.hoisted(() => ({
 
 const computerUseServiceMocks = vi.hoisted(() => ({
   ensureCodexComputerUseServiceApp: vi.fn(async () => ({
-    status: "already_installed" as const,
+    status: "already_current" as const,
     changed: false,
   })),
 }));
