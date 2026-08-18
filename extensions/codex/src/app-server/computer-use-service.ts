@@ -3,6 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { runExec } from "openclaw/plugin-sdk/process-runtime";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveMacOSDesktopCodexComputerUseServiceAppCandidates } from "./desktop-app-paths.js";
 
 const SERVICE_APP_NAME = "Codex Computer Use.app";
@@ -431,10 +432,10 @@ async function readBundleInfo(
     ["-convert", "json", "-o", "-", "--", path.join(appPath, "Contents", "Info.plist")],
     { logOutput: false, timeoutMs: INSPECT_TIMEOUT_MS },
   );
-  const parsed = JSON.parse(result.stdout) as {
-    CFBundleShortVersionString?: unknown;
-    CFBundleVersion?: unknown;
-  };
+  const parsed: unknown = JSON.parse(result.stdout);
+  if (!isRecord(parsed)) {
+    return undefined;
+  }
   const version = parsed.CFBundleShortVersionString;
   const build = parsed.CFBundleVersion;
   return typeof version === "string" && version && typeof build === "string" && build

@@ -1,6 +1,7 @@
 // Codex tests cover native Computer Use service provisioning.
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureCodexComputerUseServiceApp } from "./computer-use-service.js";
 import { resolveMacOSDesktopCodexComputerUseServiceAppCandidates } from "./desktop-app-paths.js";
@@ -321,14 +322,8 @@ describe("Codex Computer Use native service", () => {
     const targetPath = path.join(codexHome, "computer-use", "Codex Computer Use.app");
     await writeServiceFixture(firstSourcePath, CURRENT_IDENTITY);
     await writeServiceFixture(secondSourcePath, UNEXPECTED_IDENTITY);
-    let signalFirstCopyStarted: () => void;
-    let releaseFirstCopy: () => void;
-    const firstCopyStarted = new Promise<void>((resolve) => {
-      signalFirstCopyStarted = resolve;
-    });
-    const firstCopyGate = new Promise<void>((resolve) => {
-      releaseFirstCopy = resolve;
-    });
+    const firstCopyStarted = createDeferred<void>();
+    const firstCopyGate = createDeferred<void>();
     let activeCopies = 0;
     let maxActiveCopies = 0;
     const copyServiceApp = vi.fn(async (source: string, target: string) => {
@@ -336,8 +331,8 @@ describe("Codex Computer Use native service", () => {
       maxActiveCopies = Math.max(maxActiveCopies, activeCopies);
       try {
         if (source === firstSourcePath) {
-          signalFirstCopyStarted();
-          await firstCopyGate;
+          firstCopyStarted.resolve();
+          await firstCopyGate.promise;
         }
         await copyServiceFixture(source, target);
       } finally {
@@ -352,7 +347,7 @@ describe("Codex Computer Use native service", () => {
       copyServiceApp,
       inspectServiceApp: inspectServiceFixture,
     });
-    await firstCopyStarted;
+    await firstCopyStarted.promise;
     const second = ensureCodexComputerUseServiceApp({
       codexHome,
       platform: "darwin",
@@ -360,7 +355,7 @@ describe("Codex Computer Use native service", () => {
       copyServiceApp,
       inspectServiceApp: inspectServiceFixture,
     });
-    releaseFirstCopy();
+    firstCopyGate.resolve();
 
     await expect(first).resolves.toMatchObject({
       status: "installed",
