@@ -1651,8 +1651,13 @@ describe("MatrixClient request hardening", () => {
       );
       await vi.advanceTimersByTimeAsync(5_000);
       await rejection;
-      await expect(client.quiesceSync()).rejects.toThrow(
-        "Matrix classic sync did not reach STOPPED within 5000ms",
+      const repeatedOutcome = client.quiesceSync().then(
+        () => "resolved",
+        () => "rejected",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(Promise.race([repeatedOutcome, Promise.resolve("pending")])).resolves.toBe(
+        "rejected",
       );
 
       expect(syncInternals.connectionReturnedResolvers).toBeUndefined();
