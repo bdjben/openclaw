@@ -137,6 +137,10 @@ describe("Codex Computer Use native service", () => {
     const codexHomes = Array.from({ length: 65 }, (_, index) =>
       path.join(root, `codex-home-${index}`),
     );
+    const oldestCodexHome = codexHomes[0];
+    if (!oldestCodexHome) {
+      throw new Error("expected at least one Codex home fixture");
+    }
 
     for (const codexHome of codexHomes) {
       const targetPath = path.join(codexHome, "computer-use", "Codex Computer Use.app");
@@ -152,7 +156,7 @@ describe("Codex Computer Use native service", () => {
     const inspectionsBeforeRecall = inspectServiceApp.mock.calls.length;
     await expect(
       ensureCodexComputerUseServiceApp({
-        codexHome: codexHomes[0],
+        codexHome: oldestCodexHome,
         platform: "darwin",
         sourceAppCandidates: [sourcePath],
         inspectServiceApp,
