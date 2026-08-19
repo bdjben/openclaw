@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { assertNoSymlinkParents } from "openclaw/plugin-sdk/security-runtime";
 
-export type OwnedServiceParent = {
+type OwnedServiceParent = {
   logicalPath: string;
   realPath: string;
   dev: number;
