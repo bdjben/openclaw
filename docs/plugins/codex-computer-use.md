@@ -118,6 +118,9 @@ selected desktop distribution. Failed swaps roll back without changing the
 rest of the isolated Codex home. This native-app synchronization runs only for
 OpenClaw-owned isolated agent homes. User-scoped homes and explicit
 `CODEX_HOME` overrides retain their existing native bundle ownership.
+The agent directory is the trusted ownership boundary. Within it, native-service
+provisioning rejects symlinked Codex-home, `computer-use`, and service-app paths,
+and revalidates the owned parent around each staged swap.
 On macOS, when no matching
 marketplace is registered and a standard desktop app bundle exists, OpenClaw
 also tries to register the bundled Codex marketplace from

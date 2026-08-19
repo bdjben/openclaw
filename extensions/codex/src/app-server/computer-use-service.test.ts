@@ -43,7 +43,7 @@ const UNEXPECTED_IDENTITY = serviceIdentity({
 describe("Codex Computer Use native service", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-  it("installs the selected signed client beneath the isolated Codex home", async () => {
+  it("creates a fresh agent tree and installs beneath the isolated Codex home", async () => {
     const root = tempDirs.make("openclaw-computer-use-service-");
     const sourcePath = path.join(root, "source", "Codex Computer Use.app");
     const codexHome = path.join(root, "agent", "codex-home");
@@ -67,6 +67,211 @@ describe("Codex Computer Use native service", () => {
     await expect(fs.access(path.join(targetPath, CLIENT_RELATIVE_PATH))).resolves.toBeUndefined();
     await expect(inspectServiceFixture(targetPath)).resolves.toEqual(CURRENT_IDENTITY);
   });
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a symlinked isolated Codex home without touching its external target",
+    async () => {
+      const root = tempDirs.make("openclaw-computer-use-service-symlink-");
+      const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+      const agentDir = path.join(root, "agent");
+      const codexHome = path.join(agentDir, "codex-home");
+      const externalHome = path.join(root, "external-home");
+      const externalParent = path.join(externalHome, "computer-use");
+      const externalTarget = path.join(externalParent, "Codex Computer Use.app");
+      const sentinelPath = path.join(externalParent, "sentinel.txt");
+      await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+      await writeServiceFixture(externalTarget, STALE_IDENTITY);
+      await fs.writeFile(sentinelPath, "outside");
+      await fs.mkdir(agentDir, { recursive: true });
+      await fs.symlink(externalHome, codexHome);
+      const externalInode = (await fs.lstat(externalTarget)).ino;
+      const copyServiceApp = vi.fn(copyServiceFixture);
+
+      await expect(
+        ensureCodexComputerUseServiceApp({
+          codexHome,
+          platform: "darwin",
+          sourceAppCandidates: [sourcePath],
+          copyServiceApp,
+          inspectServiceApp: inspectServiceFixture,
+        }),
+      ).rejects.toThrow(/symlinked directory|real directory|symbolic link/iu);
+
+      expect(copyServiceApp).not.toHaveBeenCalled();
+      expect((await fs.lstat(codexHome)).isSymbolicLink()).toBe(true);
+      expect((await fs.lstat(externalTarget)).ino).toBe(externalInode);
+      await expect(inspectServiceFixture(externalTarget)).resolves.toEqual(STALE_IDENTITY);
+      await expect(fs.readFile(sentinelPath, "utf8")).resolves.toBe("outside");
+      await expect(findInstallDebris(externalParent)).resolves.toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a symlinked ownership root without touching its external target",
+    async () => {
+      const root = tempDirs.make("openclaw-computer-use-service-symlink-");
+      const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+      const ownershipRoot = path.join(root, "agent");
+      const codexHome = path.join(ownershipRoot, "codex-home");
+      const externalAgentRoot = path.join(root, "external-agent");
+      const externalParent = path.join(externalAgentRoot, "codex-home", "computer-use");
+      const externalTarget = path.join(externalParent, "Codex Computer Use.app");
+      const sentinelPath = path.join(externalParent, "sentinel.txt");
+      await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+      await writeServiceFixture(externalTarget, STALE_IDENTITY);
+      await fs.writeFile(sentinelPath, "outside");
+      await fs.symlink(externalAgentRoot, ownershipRoot);
+      const externalInode = (await fs.lstat(externalTarget)).ino;
+      const copyServiceApp = vi.fn(copyServiceFixture);
+
+      await expect(
+        ensureCodexComputerUseServiceApp({
+          codexHome,
+          ownershipRoot,
+          platform: "darwin",
+          sourceAppCandidates: [sourcePath],
+          copyServiceApp,
+          inspectServiceApp: inspectServiceFixture,
+        }),
+      ).rejects.toThrow(/symlinked directory|real director|symbolic link/iu);
+
+      expect(copyServiceApp).not.toHaveBeenCalled();
+      expect((await fs.lstat(ownershipRoot)).isSymbolicLink()).toBe(true);
+      expect((await fs.lstat(externalTarget)).ino).toBe(externalInode);
+      await expect(inspectServiceFixture(externalTarget)).resolves.toEqual(STALE_IDENTITY);
+      await expect(fs.readFile(sentinelPath, "utf8")).resolves.toBe("outside");
+      await expect(findInstallDebris(externalParent)).resolves.toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a symlinked Computer Use parent without touching its external target",
+    async () => {
+      const root = tempDirs.make("openclaw-computer-use-service-symlink-");
+      const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+      const codexHome = path.join(root, "codex-home");
+      const targetParent = path.join(codexHome, "computer-use");
+      const externalParent = path.join(root, "external-computer-use");
+      const externalTarget = path.join(externalParent, "Codex Computer Use.app");
+      const sentinelPath = path.join(externalParent, "sentinel.txt");
+      await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+      await writeServiceFixture(externalTarget, STALE_IDENTITY);
+      await fs.writeFile(sentinelPath, "outside");
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.symlink(externalParent, targetParent);
+      const externalInode = (await fs.lstat(externalTarget)).ino;
+      const copyServiceApp = vi.fn(copyServiceFixture);
+
+      await expect(
+        ensureCodexComputerUseServiceApp({
+          codexHome,
+          platform: "darwin",
+          sourceAppCandidates: [sourcePath],
+          copyServiceApp,
+          inspectServiceApp: inspectServiceFixture,
+        }),
+      ).rejects.toThrow(/symlinked directory|real directory|symbolic link/iu);
+
+      expect(copyServiceApp).not.toHaveBeenCalled();
+      expect((await fs.lstat(targetParent)).isSymbolicLink()).toBe(true);
+      expect((await fs.lstat(externalTarget)).ino).toBe(externalInode);
+      await expect(inspectServiceFixture(externalTarget)).resolves.toEqual(STALE_IDENTITY);
+      await expect(fs.readFile(sentinelPath, "utf8")).resolves.toBe("outside");
+      await expect(findInstallDebris(externalParent)).resolves.toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a symlinked service target without following its external app",
+    async () => {
+      const root = tempDirs.make("openclaw-computer-use-service-symlink-");
+      const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+      const codexHome = path.join(root, "codex-home");
+      const targetParent = path.join(codexHome, "computer-use");
+      const targetPath = path.join(targetParent, "Codex Computer Use.app");
+      const externalTarget = path.join(root, "external", "Codex Computer Use.app");
+      await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+      await writeServiceFixture(externalTarget, STALE_IDENTITY);
+      await fs.mkdir(targetParent, { recursive: true });
+      await fs.symlink(externalTarget, targetPath);
+      const externalInode = (await fs.lstat(externalTarget)).ino;
+      const copyServiceApp = vi.fn(copyServiceFixture);
+
+      await expect(
+        ensureCodexComputerUseServiceApp({
+          codexHome,
+          platform: "darwin",
+          sourceAppCandidates: [sourcePath],
+          copyServiceApp,
+          inspectServiceApp: inspectServiceFixture,
+        }),
+      ).rejects.toThrow(/must not be a symbolic link/iu);
+
+      expect(copyServiceApp).not.toHaveBeenCalled();
+      expect((await fs.lstat(targetPath)).isSymbolicLink()).toBe(true);
+      await expect(fs.readlink(targetPath)).resolves.toBe(externalTarget);
+      expect((await fs.lstat(externalTarget)).ino).toBe(externalInode);
+      await expect(inspectServiceFixture(externalTarget)).resolves.toEqual(STALE_IDENTITY);
+      await expect(findInstallDebris(targetParent)).resolves.toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "refuses to publish or clean up through a parent rebound during staging",
+    async () => {
+      const root = tempDirs.make("openclaw-computer-use-service-rebind-");
+      const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+      const codexHome = path.join(root, "codex-home");
+      const targetParent = path.join(codexHome, "computer-use");
+      const targetPath = path.join(targetParent, "Codex Computer Use.app");
+      const parkedParent = path.join(codexHome, "computer-use-owned");
+      const externalParent = path.join(root, "external-computer-use");
+      const externalTarget = path.join(externalParent, "Codex Computer Use.app");
+      const externalSentinel = path.join(externalParent, "sentinel.txt");
+      await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+      await writeServiceFixture(targetPath, STALE_IDENTITY);
+      await writeServiceFixture(externalTarget, UNEXPECTED_IDENTITY);
+      await fs.writeFile(externalSentinel, "outside");
+      const externalInode = (await fs.lstat(externalTarget)).ino;
+      let externalStagingSentinel = "";
+
+      await expect(
+        ensureCodexComputerUseServiceApp({
+          codexHome,
+          platform: "darwin",
+          sourceAppCandidates: [sourcePath],
+          copyServiceApp: async (source, stagedTarget) => {
+            await copyServiceFixture(source, stagedTarget);
+            const stagingName = path.basename(path.dirname(stagedTarget));
+            externalStagingSentinel = path.join(
+              externalParent,
+              stagingName,
+              "external-sentinel.txt",
+            );
+            await fs.mkdir(path.dirname(externalStagingSentinel), { recursive: true });
+            await fs.writeFile(externalStagingSentinel, "do-not-delete");
+            await fs.rename(targetParent, parkedParent);
+            await fs.symlink(externalParent, targetParent);
+          },
+          inspectServiceApp: inspectServiceFixture,
+        }),
+      ).rejects.toThrow(/service parent changed during refresh/iu);
+
+      expect(externalStagingSentinel).not.toBe("");
+      await expect(fs.readFile(externalStagingSentinel, "utf8")).resolves.toBe("do-not-delete");
+      await expect(fs.readFile(externalSentinel, "utf8")).resolves.toBe("outside");
+      expect((await fs.lstat(externalTarget)).ino).toBe(externalInode);
+      await expect(inspectServiceFixture(externalTarget)).resolves.toEqual(UNEXPECTED_IDENTITY);
+      await expect(
+        inspectServiceFixture(path.join(parkedParent, "Codex Computer Use.app")),
+      ).resolves.toEqual(STALE_IDENTITY);
+      await expect(
+        findInstallDebris(externalParent).then((entries) =>
+          entries.filter((entry) => entry.startsWith(".service-app.backup-")),
+        ),
+      ).resolves.toEqual([]);
+    },
+  );
 
   it("reuses a target only when its full signed identity matches the selected source", async () => {
     const root = tempDirs.make("openclaw-computer-use-service-");

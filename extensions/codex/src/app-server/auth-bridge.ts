@@ -533,6 +533,7 @@ async function withCodexHomeEnvironment(
     try {
       await ensureCodexComputerUseServiceApp({
         codexHome,
+        ownershipRoot: agentDir,
         appServerCommand: startOptions.command,
       });
     } catch (error) {

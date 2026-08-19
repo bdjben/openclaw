@@ -5,6 +5,17 @@ import path from "node:path";
 import { pruneMapToMaxSize } from "openclaw/plugin-sdk/collection-runtime";
 import { runExec } from "openclaw/plugin-sdk/process-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  assertDirectoryIdentityStable,
+  assertNotSymlink,
+  assertOwnedServiceParentStable,
+  assertOwnedServicePath,
+  directoryIdentityIsStable,
+  ensureOwnedCodexHome,
+  ownedServiceParentIsStable,
+  prepareOwnedServiceParent,
+  readRealDirectoryIdentity,
+} from "./computer-use-service-path.js";
 import { resolveMacOSDesktopCodexComputerUseServiceAppCandidates } from "./desktop-app-paths.js";
 
 const SERVICE_APP_NAME = "Codex Computer Use.app";
@@ -64,6 +75,7 @@ type ServiceAppSnapshot = {
 /** Synchronizes the CODEX_HOME native client with the selected signed desktop distribution. */
 export async function ensureCodexComputerUseServiceApp(params: {
   codexHome: string;
+  ownershipRoot?: string;
   platform?: NodeJS.Platform;
   appServerCommand?: string;
   sourceAppCandidates?: readonly string[];
@@ -74,7 +86,12 @@ export async function ensureCodexComputerUseServiceApp(params: {
   if (platform !== "darwin") {
     return { status: "unsupported", changed: false };
   }
-  const targetPath = path.join(path.resolve(params.codexHome), "computer-use", SERVICE_APP_NAME);
+  const codexHome = path.resolve(params.codexHome);
+  const ownershipRoot = path.resolve(params.ownershipRoot ?? path.dirname(codexHome));
+  const targetParent = path.join(codexHome, "computer-use");
+  const targetPath = path.join(targetParent, SERVICE_APP_NAME);
+  await ensureOwnedCodexHome(codexHome, ownershipRoot);
+  await assertOwnedServicePath({ ownershipRoot, codexHome, targetParent, targetPath });
   const candidates =
     params.sourceAppCandidates ??
     resolveMacOSDesktopCodexComputerUseServiceAppCandidates(platform, params.appServerCommand);
@@ -105,6 +122,9 @@ export async function ensureCodexComputerUseServiceApp(params: {
   }
   const install = ensureCodexComputerUseServiceAppOnce({
     ...params,
+    codexHome,
+    ownershipRoot,
+    targetParent,
     targetPath,
     platform,
     sourceAppCandidates: candidates,
@@ -138,6 +158,8 @@ function isCompletedSyncStatus(status: CodexComputerUseServiceStatus["status"]):
 
 async function ensureCodexComputerUseServiceAppOnce(params: {
   codexHome: string;
+  ownershipRoot: string;
+  targetParent: string;
   targetPath: string;
   platform: NodeJS.Platform;
   appServerCommand?: string;
@@ -152,7 +174,14 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
     return { status: "source_missing", changed: false, targetPath: params.targetPath };
   }
   const { path: sourcePath, identity: sourceIdentity } = source;
-  const initialTarget = await readServiceAppSnapshot(params.targetPath, inspectServiceApp);
+  const ownedParent = await prepareOwnedServiceParent({
+    ownershipRoot: params.ownershipRoot,
+    codexHome: params.codexHome,
+    targetParent: params.targetParent,
+  });
+  const operationTargetPath = path.join(ownedParent.realPath, SERVICE_APP_NAME);
+  await assertNotSymlink(operationTargetPath, "Computer Use service target");
+  const initialTarget = await readServiceAppSnapshot(operationTargetPath, inspectServiceApp);
   if (initialTarget.identity && identitiesMatch(initialTarget.identity, sourceIdentity)) {
     return {
       status: "already_current",
@@ -163,14 +192,26 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
     };
   }
 
-  const targetParent = path.dirname(params.targetPath);
-  await fs.mkdir(targetParent, { recursive: true });
-  const stagingRoot = await fs.mkdtemp(path.join(targetParent, ".service-app.staging-"));
+  await assertOwnedServiceParentStable(ownedParent);
+  const stagingRoot = await fs.mkdtemp(path.join(ownedParent.realPath, ".service-app.staging-"));
+  const stagingRootIdentity = await readRealDirectoryIdentity(
+    stagingRoot,
+    "Computer Use service staging directory",
+  );
   const stagedPath = path.join(stagingRoot, SERVICE_APP_NAME);
-  const backupPath = path.join(targetParent, `.service-app.backup-${process.pid}-${Date.now()}`);
+  const backupPath = path.join(
+    ownedParent.realPath,
+    `.service-app.backup-${process.pid}-${Date.now()}`,
+  );
   let backupCreated = false;
   try {
     await (params.copyServiceApp ?? copyServiceAppWithDitto)(sourcePath, stagedPath);
+    await assertOwnedServiceParentStable(ownedParent);
+    await assertDirectoryIdentityStable(
+      stagingRootIdentity,
+      "Computer Use service staging directory",
+    );
+    await assertNotSymlink(stagedPath, "Copied Computer Use service app");
     const stagedIdentity = await inspectServiceApp(stagedPath);
     if (!stagedIdentity || !identitiesMatch(stagedIdentity, sourceIdentity)) {
       throw new Error(
@@ -179,17 +220,23 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
     }
     const stagedSnapshot = await readServiceAppSnapshot(stagedPath, inspectServiceApp);
     const currentSourceIdentity = await inspectServiceApp(sourcePath);
+    await assertOwnedServiceParentStable(ownedParent);
     if (!currentSourceIdentity || !identitiesMatch(currentSourceIdentity, sourceIdentity)) {
       throw new Error("Selected Computer Use service source changed during refresh.");
     }
-    if (await pathExists(params.targetPath)) {
-      await fs.rename(params.targetPath, backupPath);
+    await assertNotSymlink(operationTargetPath, "Computer Use service target");
+    if (await pathExists(operationTargetPath)) {
+      await assertOwnedServiceParentStable(ownedParent);
+      await fs.rename(operationTargetPath, backupPath);
+      await assertOwnedServiceParentStable(ownedParent);
       backupCreated = true;
       const movedTarget = await readServiceAppSnapshot(backupPath, inspectServiceApp);
       if (movedTarget.identity && identitiesMatch(movedTarget.identity, sourceIdentity)) {
         // Another runtime installed the selected signed generation while this
         // process was staging. Keep that winner rather than replacing it.
-        await fs.rename(backupPath, params.targetPath);
+        await assertOwnedServiceParentStable(ownedParent);
+        await fs.rename(backupPath, operationTargetPath);
+        await assertOwnedServiceParentStable(ownedParent);
         backupCreated = false;
         return {
           status: "already_current",
@@ -200,7 +247,9 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
         };
       }
       if (!snapshotsMatch(initialTarget, movedTarget)) {
-        await fs.rename(backupPath, params.targetPath);
+        await assertOwnedServiceParentStable(ownedParent);
+        await fs.rename(backupPath, operationTargetPath);
+        await assertOwnedServiceParentStable(ownedParent);
         backupCreated = false;
         throw new Error(
           "Computer Use service target changed to an unexpected generation during refresh.",
@@ -208,13 +257,19 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
       }
     }
     try {
-      await fs.rename(stagedPath, params.targetPath);
+      await assertOwnedServiceParentStable(ownedParent);
+      await fs.rename(stagedPath, operationTargetPath);
+      await assertOwnedServiceParentStable(ownedParent);
     } catch (error) {
-      const winnerIdentity = await inspectServiceApp(params.targetPath);
+      await assertOwnedServiceParentStable(ownedParent);
+      await assertNotSymlink(operationTargetPath, "Computer Use service target");
+      const winnerIdentity = await inspectServiceApp(operationTargetPath);
       if (!winnerIdentity || !identitiesMatch(winnerIdentity, sourceIdentity)) {
         if (backupCreated) {
-          if (!(await pathExists(params.targetPath))) {
-            await fs.rename(backupPath, params.targetPath);
+          if (!(await pathExists(operationTargetPath))) {
+            await assertOwnedServiceParentStable(ownedParent);
+            await fs.rename(backupPath, operationTargetPath);
+            await assertOwnedServiceParentStable(ownedParent);
             backupCreated = false;
           }
         }
@@ -222,7 +277,10 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
       }
       // A concurrent installer won with the same selected signed generation.
       if (backupCreated) {
+        await assertOwnedServiceParentStable(ownedParent);
+        await assertNotSymlink(backupPath, "Computer Use service backup");
         await fs.rm(backupPath, { recursive: true, force: true });
+        await assertOwnedServiceParentStable(ownedParent);
         backupCreated = false;
       }
       return {
@@ -233,15 +291,19 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
         sourceBuild: sourceIdentity.build,
       };
     }
-    const installedSnapshot = await readServiceAppSnapshot(params.targetPath, inspectServiceApp);
+    await assertNotSymlink(operationTargetPath, "Installed Computer Use service app");
+    const installedSnapshot = await readServiceAppSnapshot(operationTargetPath, inspectServiceApp);
     if (
       !installedSnapshot.identity ||
       !identitiesMatch(installedSnapshot.identity, sourceIdentity)
     ) {
       if (filesystemSnapshotsMatch(installedSnapshot, stagedSnapshot)) {
-        await fs.rm(params.targetPath, { recursive: true, force: true });
+        await assertOwnedServiceParentStable(ownedParent);
+        await fs.rm(operationTargetPath, { recursive: true, force: true });
+        await assertOwnedServiceParentStable(ownedParent);
         if (backupCreated) {
-          await fs.rename(backupPath, params.targetPath);
+          await fs.rename(backupPath, operationTargetPath);
+          await assertOwnedServiceParentStable(ownedParent);
           backupCreated = false;
         }
       }
@@ -250,7 +312,10 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
       );
     }
     if (backupCreated) {
+      await assertOwnedServiceParentStable(ownedParent);
+      await assertNotSymlink(backupPath, "Computer Use service backup");
       await fs.rm(backupPath, { recursive: true, force: true });
+      await assertOwnedServiceParentStable(ownedParent);
       backupCreated = false;
     }
     return {
@@ -262,13 +327,23 @@ async function ensureCodexComputerUseServiceAppOnce(params: {
       ...(initialTarget.identity ? { previousBuild: initialTarget.identity.build } : {}),
     };
   } catch (error) {
-    if (backupCreated && !(await pathExists(params.targetPath))) {
-      await fs.rename(backupPath, params.targetPath);
+    if (
+      backupCreated &&
+      (await ownedServiceParentIsStable(ownedParent)) &&
+      !(await pathExists(operationTargetPath))
+    ) {
+      await assertOwnedServiceParentStable(ownedParent);
+      await fs.rename(backupPath, operationTargetPath);
       backupCreated = false;
     }
     throw error;
   } finally {
-    await fs.rm(stagingRoot, { recursive: true, force: true });
+    if (
+      (await ownedServiceParentIsStable(ownedParent)) &&
+      (await directoryIdentityIsStable(stagingRootIdentity))
+    ) {
+      await fs.rm(stagingRoot, { recursive: true, force: true });
+    }
   }
 }
 

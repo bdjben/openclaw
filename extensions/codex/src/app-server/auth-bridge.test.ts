@@ -348,6 +348,7 @@ describe("bridgeCodexAppServerStartOptions", () => {
 
       expect(computerUseServiceMocks.ensureCodexComputerUseServiceApp).toHaveBeenCalledWith({
         codexHome,
+        ownershipRoot: agentDir,
         appServerCommand: startOptions.command,
       });
     });
