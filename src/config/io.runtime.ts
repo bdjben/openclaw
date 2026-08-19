@@ -87,11 +87,13 @@ export function loadConfig(options?: {
   skipPluginValidation?: boolean;
   pin?: boolean;
   skipShellEnvFallback?: boolean;
+  observe?: boolean;
 }): OpenClawConfig {
   const loadFresh = () =>
     createConfigIO({
       ...(options?.skipPluginValidation ? { pluginValidation: "skip" as const } : {}),
       ...(options?.skipShellEnvFallback ? { shellEnvFallback: "defer" as const } : {}),
+      ...(options?.observe === false ? { observe: false } : {}),
     }).loadConfig();
   return options?.pin === false ? loadFresh() : loadPinnedRuntimeConfig(loadFresh);
 }
@@ -100,6 +102,7 @@ export function getRuntimeConfig(options?: {
   skipPluginValidation?: boolean;
   pin?: boolean;
   skipShellEnvFallback?: boolean;
+  observe?: boolean;
 }): OpenClawConfig {
   return loadConfig(options);
 }
