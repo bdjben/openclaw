@@ -129,6 +129,38 @@ describe("Codex Computer Use native service", () => {
     expect(copyServiceApp).toHaveBeenCalledTimes(copyCount);
   });
 
+  it("bounds completed synchronization state and re-inspects an evicted home", async () => {
+    const root = tempDirs.make("openclaw-computer-use-service-cache-");
+    const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+    await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+    const inspectServiceApp = vi.fn(inspectServiceFixture);
+    const codexHomes = Array.from({ length: 65 }, (_, index) =>
+      path.join(root, `codex-home-${index}`),
+    );
+
+    for (const codexHome of codexHomes) {
+      const targetPath = path.join(codexHome, "computer-use", "Codex Computer Use.app");
+      await writeServiceFixture(targetPath, CURRENT_IDENTITY);
+      await ensureCodexComputerUseServiceApp({
+        codexHome,
+        platform: "darwin",
+        sourceAppCandidates: [sourcePath],
+        inspectServiceApp,
+      });
+    }
+
+    const inspectionsBeforeRecall = inspectServiceApp.mock.calls.length;
+    await expect(
+      ensureCodexComputerUseServiceApp({
+        codexHome: codexHomes[0],
+        platform: "darwin",
+        sourceAppCandidates: [sourcePath],
+        inspectServiceApp,
+      }),
+    ).resolves.toMatchObject({ status: "already_current", changed: false });
+    expect(inspectServiceApp.mock.calls.length).toBeGreaterThan(inspectionsBeforeRecall);
+  });
+
   it("invalidates a completed selection before a different selection fails", async () => {
     const root = tempDirs.make("openclaw-computer-use-service-");
     const firstSourcePath = path.join(root, "first", "Codex Computer Use.app");

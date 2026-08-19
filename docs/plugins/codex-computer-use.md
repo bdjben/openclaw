@@ -115,7 +115,9 @@ nested client signatures, bundle identities, versions, builds, and code hashes.
 It installs a missing or incomplete copy, or stages and verifies a replacement
 before swapping out a complete copy whose signed identity no longer matches the
 selected desktop distribution. Failed swaps roll back without changing the
-rest of the isolated Codex home.
+rest of the isolated Codex home. This native-app synchronization runs only for
+OpenClaw-owned isolated agent homes. User-scoped homes and explicit
+`CODEX_HOME` overrides retain their existing native bundle ownership.
 On macOS, when no matching
 marketplace is registered and a standard desktop app bundle exists, OpenClaw
 also tries to register the bundled Codex marketplace from

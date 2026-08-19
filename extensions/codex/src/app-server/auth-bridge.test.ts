@@ -365,6 +365,35 @@ describe("bridgeCodexAppServerStartOptions", () => {
     });
   });
 
+  it("does not replace the native service app for user-scoped homes", async () => {
+    await withTempDir("openclaw-codex-computer-use-user-home-", async (root) => {
+      const codexHome = path.join(root, "user-codex-home");
+      vi.stubEnv("CODEX_HOME", codexHome);
+
+      await bridgeCodexAppServerStartOptions({
+        startOptions: createStartOptions({ homeScope: "user" }),
+        agentDir: path.join(root, "agent"),
+        pluginConfig: { computerUse: { enabled: true, autoInstall: true } },
+      });
+
+      expect(computerUseServiceMocks.ensureCodexComputerUseServiceApp).not.toHaveBeenCalled();
+    });
+  });
+
+  it("does not replace the native service app for an explicit CODEX_HOME", async () => {
+    await withTempDir("openclaw-codex-computer-use-explicit-home-", async (root) => {
+      const codexHome = path.join(root, "explicit-codex-home");
+
+      await bridgeCodexAppServerStartOptions({
+        startOptions: createStartOptions({ env: { CODEX_HOME: codexHome } }),
+        agentDir: path.join(root, "agent"),
+        pluginConfig: { computerUse: { enabled: true, autoInstall: true } },
+      });
+
+      expect(computerUseServiceMocks.ensureCodexComputerUseServiceApp).not.toHaveBeenCalled();
+    });
+  });
+
   it("classifies native client provisioning failures as harness preflight", async () => {
     computerUseServiceMocks.ensureCodexComputerUseServiceApp.mockRejectedValueOnce(
       new Error("copy failed"),

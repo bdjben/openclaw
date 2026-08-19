@@ -2,6 +2,7 @@
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pruneMapToMaxSize } from "openclaw/plugin-sdk/collection-runtime";
 import { runExec } from "openclaw/plugin-sdk/process-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveMacOSDesktopCodexComputerUseServiceAppCandidates } from "./desktop-app-paths.js";
@@ -19,6 +20,7 @@ const CLIENT_RELATIVE_PATH = path.join(
 );
 const COPY_TIMEOUT_MS = 120_000;
 const INSPECT_TIMEOUT_MS = 30_000;
+const COMPLETED_SYNC_CACHE_MAX_ENTRIES = 64;
 const activeInstalls = new Map<
   string,
   { syncKey: string; promise: Promise<CodexComputerUseServiceStatus> }
@@ -79,6 +81,9 @@ export async function ensureCodexComputerUseServiceApp(params: {
   const syncKey = [targetPath, ...candidates].join("\0");
   const completed = completedSyncs.get(targetPath);
   if (completed?.syncKey === syncKey) {
+    // Keep frequently reused homes while bounding dynamic-agent history.
+    completedSyncs.delete(targetPath);
+    completedSyncs.set(targetPath, completed);
     return {
       status: "already_current",
       changed: false,
@@ -105,12 +110,14 @@ export async function ensureCodexComputerUseServiceApp(params: {
     sourceAppCandidates: candidates,
   }).then((result) => {
     if (isCompletedSyncStatus(result.status)) {
+      completedSyncs.delete(targetPath);
       completedSyncs.set(targetPath, {
         syncKey,
         targetPath: result.targetPath,
         sourcePath: result.sourcePath,
         sourceBuild: result.sourceBuild,
       });
+      pruneMapToMaxSize(completedSyncs, COMPLETED_SYNC_CACHE_MAX_ENTRIES);
     }
     return result;
   });
