@@ -170,7 +170,7 @@ describe("Codex Computer Use bundled marketplace", () => {
       let rebound = false;
       vi.spyOn(fs, "symlink").mockImplementation(async (target, linkPath, type) => {
         await originalSymlink(target, linkPath, type);
-        if (!rebound && path.basename(linkPath).startsWith(".openai-bundled.staging-")) {
+        if (!rebound && path.basename(String(linkPath)).startsWith(".openai-bundled.staging-")) {
           rebound = true;
           await fs.rename(marketplaceParent, parkedParent);
           await originalSymlink(externalParent, marketplaceParent, "dir");
