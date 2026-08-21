@@ -334,6 +334,45 @@ describe("Codex Computer Use native service", () => {
     expect(copyServiceApp).toHaveBeenCalledTimes(copyCount);
   });
 
+  it("refreshes a completed sync when its source changes in place", async () => {
+    const root = tempDirs.make("openclaw-computer-use-service-");
+    const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+    const codexHome = path.join(root, "codex-home");
+    const targetPath = path.join(codexHome, "computer-use", "Codex Computer Use.app");
+    await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+    const copyServiceApp = vi.fn(copyServiceFixture);
+    const inspectServiceApp = vi.fn(inspectServiceFixture);
+
+    await expect(
+      ensureCodexComputerUseServiceApp({
+        codexHome,
+        platform: "darwin",
+        sourceAppCandidates: [sourcePath],
+        copyServiceApp,
+        inspectServiceApp,
+      }),
+    ).resolves.toMatchObject({ status: "installed", sourceBuild: "1000761" });
+
+    await writeServiceFixture(sourcePath, UNEXPECTED_IDENTITY);
+    await fs.writeFile(path.join(sourcePath, CLIENT_RELATIVE_PATH), "updated-client");
+
+    await expect(
+      ensureCodexComputerUseServiceApp({
+        codexHome,
+        platform: "darwin",
+        sourceAppCandidates: [sourcePath],
+        copyServiceApp,
+        inspectServiceApp,
+      }),
+    ).resolves.toMatchObject({
+      status: "refreshed",
+      previousBuild: "1000761",
+      sourceBuild: "1000900",
+    });
+    expect(copyServiceApp).toHaveBeenCalledTimes(2);
+    await expect(inspectServiceFixture(targetPath)).resolves.toEqual(UNEXPECTED_IDENTITY);
+  });
+
   it("bounds completed synchronization state and re-inspects an evicted home", async () => {
     const root = tempDirs.make("openclaw-computer-use-service-cache-");
     const sourcePath = path.join(root, "source", "Codex Computer Use.app");

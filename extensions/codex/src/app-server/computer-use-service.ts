@@ -95,7 +95,8 @@ export async function ensureCodexComputerUseServiceApp(params: {
   const candidates =
     params.sourceAppCandidates ??
     resolveMacOSDesktopCodexComputerUseServiceAppCandidates(platform, params.appServerCommand);
-  const syncKey = [targetPath, ...candidates].join("\0");
+  const sourceKeys = await Promise.all(candidates.map(readServiceAppFilesystemKey));
+  const syncKey = [targetPath, ...candidates, ...sourceKeys].join("\0");
   const completed = completedSyncs.get(targetPath);
   if (completed?.syncKey === syncKey) {
     // Keep frequently reused homes while bounding dynamic-agent history.
