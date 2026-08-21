@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureCodexComputerUseBundledMarketplace } from "./computer-use-marketplace.js";
@@ -170,7 +171,12 @@ describe("Codex Computer Use bundled marketplace", () => {
       let rebound = false;
       vi.spyOn(fs, "symlink").mockImplementation(async (target, linkPath, type) => {
         await originalSymlink(target, linkPath, type);
-        if (!rebound && path.basename(String(linkPath)).startsWith(".openai-bundled.staging-")) {
+        const linkPathString = resolvePathArgument(linkPath);
+        if (
+          !rebound &&
+          linkPathString &&
+          path.basename(linkPathString).startsWith(".openai-bundled.staging-")
+        ) {
           rebound = true;
           await fs.rename(marketplaceParent, parkedParent);
           await originalSymlink(externalParent, marketplaceParent, "dir");
@@ -221,7 +227,8 @@ describe("Codex Computer Use bundled marketplace", () => {
       let rebound = false;
       vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
         await originalWriteFile(file, data, options);
-        if (!rebound && path.basename(String(file)).startsWith(".config.toml.staging-")) {
+        const filePath = resolvePathArgument(file);
+        if (!rebound && filePath && path.basename(filePath).startsWith(".config.toml.staging-")) {
           rebound = true;
           await fs.rename(codexHome, parkedHome);
           await originalSymlink(externalHome, codexHome, "dir");
@@ -246,3 +253,16 @@ describe("Codex Computer Use bundled marketplace", () => {
     },
   );
 });
+
+function resolvePathArgument(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString();
+  }
+  if (value instanceof URL) {
+    return fileURLToPath(value);
+  }
+  return undefined;
+}
