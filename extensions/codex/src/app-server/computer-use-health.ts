@@ -56,7 +56,7 @@ export function startCodexComputerUseHealthMonitor(params: {
     params.repairComputerUseRuntime ??
     (params.repairComputerUseMcpChildren
       ? undefined
-      : getCodexComputerUseRuntimeReconciler(params.client).repairAfterProbeFailure);
+      : getCodexComputerUseRuntimeReconciler(params.client)?.repairAfterProbeFailure);
   const fingerprint = buildComputerUseHealthMonitorFingerprint(params.config);
   const intervalMs = params.config.healthCheckIntervalMinutes * 60_000;
   if (

@@ -480,6 +480,27 @@ describe("Codex Computer Use setup", () => {
     ).toHaveLength(2);
   });
 
+  it("preserves the auto-repair opt-out outside managed isolated runtimes", async () => {
+    const request = createComputerUseRequest({ installed: true, liveTestFailures: 2 });
+    const client = { request } as never;
+    runtimeRepairMocks.getReconciler.mockReturnValueOnce(undefined);
+
+    const status = await ensureCodexComputerUse({
+      pluginConfig: { computerUse: { enabled: true, marketplaceName: "desktop-tools" } },
+      client,
+    });
+
+    expect(runtimeRepairMocks.getReconciler).toHaveBeenCalledWith(client);
+    expect(runtimeRepairMocks.synchronizeBeforeRequest).not.toHaveBeenCalled();
+    expect(runtimeRepairMocks.repairAfterProbeFailure).not.toHaveBeenCalled();
+    expect(status.liveTest).toMatchObject({
+      status: "failed",
+      attempts: 2,
+      retried: true,
+      repaired: false,
+    });
+  });
+
   it("fails fast when the named MCP server exposes no tools", async () => {
     const request = createComputerUseRequest({ installed: true, mcpToolsAvailable: false });
 

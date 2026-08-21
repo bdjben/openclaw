@@ -30,12 +30,14 @@ import {
 } from "./auth-start-options.js";
 import type { CodexAppServerClient } from "./client.js";
 import { ensureCodexComputerUseSharedPluginCache } from "./computer-use-cache.js";
+import { ensureCodexComputerUseBundledMarketplace } from "./computer-use-marketplace.js";
 import { ensureCodexComputerUseServiceApp } from "./computer-use-service.js";
 import {
   resolveCodexComputerUseConfig,
   type CodexAppServerHomeScope,
   type CodexAppServerStartOptions,
 } from "./config.js";
+import { acquireCodexNativeConfigFence } from "./native-config-fence.js";
 import {
   isJsonObject,
   type CodexChatgptAuthTokensRefreshResponse,
@@ -523,12 +525,24 @@ async function withCodexHomeEnvironment(
     : undefined;
   await fs.mkdir(codexHome, { recursive: true });
   const computerUseConfig = resolveCodexComputerUseConfig({ pluginConfig });
-  await ensureCodexComputerUseSharedPluginCache({
-    codexHome,
-    config: computerUseConfig,
-  });
   const ownsIsolatedCodexHome =
     startOptions.homeScope !== "user" && !startOptions.env?.[CODEX_HOME_ENV_VAR]?.trim();
+  const configFenceKey = `codex-home:${path.resolve(codexHome)}`;
+  const releaseConfigFence = await acquireCodexNativeConfigFence(configFenceKey);
+  try {
+    if (ownsIsolatedCodexHome) {
+      await ensureCodexComputerUseBundledMarketplace({
+        codexHome,
+        config: computerUseConfig,
+      });
+    }
+    await ensureCodexComputerUseSharedPluginCache({
+      codexHome,
+      config: computerUseConfig,
+    });
+  } finally {
+    releaseConfigFence();
+  }
   if (computerUseConfig.enabled && computerUseConfig.autoInstall && ownsIsolatedCodexHome) {
     try {
       await ensureCodexComputerUseServiceApp({

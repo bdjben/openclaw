@@ -7,6 +7,7 @@ const runtimeMocks = vi.hoisted(() => ({
   ensureService: vi.fn(),
   killChildren: vi.fn(),
   readContext: vi.fn(),
+  retireClient: vi.fn(),
 }));
 
 vi.mock("./computer-use-service.js", () => ({
@@ -18,7 +19,11 @@ vi.mock("./computer-use-process-repair.js", () => ({
 }));
 
 vi.mock("./shared-client.js", () => ({
+  CodexAppServerStartSelectionChangedError: class CodexAppServerStartSelectionChangedError extends Error {
+    readonly code = "CODEX_APP_SERVER_START_SELECTION_CHANGED";
+  },
   readCodexComputerUseRuntimeContext: runtimeMocks.readContext,
+  retireSharedCodexAppServerClientIfCurrent: runtimeMocks.retireClient,
 }));
 
 import { getCodexComputerUseRuntimeReconciler } from "./computer-use-runtime-repair.js";
@@ -29,31 +34,66 @@ describe("Codex Computer Use runtime reconciliation", () => {
     runtimeMocks.ensureService.mockReset();
     runtimeMocks.killChildren.mockReset();
     runtimeMocks.readContext.mockReset();
+    runtimeMocks.retireClient.mockReset();
   });
 
-  it("replaces the warm native client immediately when the signed source changed", async () => {
+  it("retires the warm app-server when the signed source changed", async () => {
     const client = createClient(4101);
     runtimeMocks.readContext.mockReturnValue(runtimeContext());
-    runtimeMocks.ensureService.mockResolvedValue({ status: "refreshed", changed: true });
+    runtimeMocks.ensureService.mockResolvedValue({
+      status: "refreshed",
+      changed: true,
+      sourceBuild: "1000816",
+    });
     runtimeMocks.killChildren.mockResolvedValue(repairStatus([4201]));
 
-    await getCodexComputerUseRuntimeReconciler(client).synchronizeBeforeRequest();
+    await expect(requireRuntimeReconciler(client).synchronizeBeforeRequest()).rejects.toMatchObject(
+      { code: "CODEX_APP_SERVER_START_SELECTION_CHANGED" },
+    );
 
-    expect(runtimeMocks.ensureService).toHaveBeenCalledWith({
-      ...runtimeContext(),
-      forceRevalidate: false,
-    });
+    expect(runtimeMocks.ensureService).toHaveBeenCalledWith(serviceParams(false));
     expect(runtimeMocks.killChildren).toHaveBeenCalledWith({ ancestorPid: 4101 });
+    expect(runtimeMocks.retireClient).toHaveBeenCalledWith(client);
   });
 
   it("keeps the warm fast path when the signed source generation is unchanged", async () => {
     const client = createClient(4102);
     runtimeMocks.readContext.mockReturnValue(runtimeContext());
-    runtimeMocks.ensureService.mockResolvedValue({ status: "already_current", changed: false });
+    runtimeMocks.ensureService.mockResolvedValue({
+      status: "already_current",
+      changed: false,
+      sourceBuild: "1000816",
+    });
 
-    await getCodexComputerUseRuntimeReconciler(client).synchronizeBeforeRequest();
+    await requireRuntimeReconciler(client).synchronizeBeforeRequest();
 
     expect(runtimeMocks.killChildren).not.toHaveBeenCalled();
+    expect(runtimeMocks.retireClient).not.toHaveBeenCalled();
+  });
+
+  it("retires the warm app-server when another reconciler already refreshed its target", async () => {
+    const client = createClient(4105);
+    runtimeMocks.readContext.mockReturnValue(runtimeContext());
+    runtimeMocks.ensureService
+      .mockResolvedValueOnce({
+        status: "already_current",
+        changed: false,
+        sourceBuild: "1000790",
+      })
+      .mockResolvedValueOnce({
+        status: "already_current",
+        changed: false,
+        sourceBuild: "1000816",
+      });
+    const reconciler = requireRuntimeReconciler(client);
+
+    await reconciler.synchronizeBeforeRequest();
+    await expect(reconciler.synchronizeBeforeRequest()).rejects.toMatchObject({
+      code: "CODEX_APP_SERVER_START_SELECTION_CHANGED",
+    });
+
+    expect(runtimeMocks.killChildren).not.toHaveBeenCalled();
+    expect(runtimeMocks.retireClient).toHaveBeenCalledWith(client);
   });
 
   it("force-revalidates the bundle and replaces the client after a failed handshake", async () => {
@@ -62,12 +102,9 @@ describe("Codex Computer Use runtime reconciliation", () => {
     runtimeMocks.ensureService.mockResolvedValue({ status: "already_current", changed: false });
     runtimeMocks.killChildren.mockResolvedValue(repairStatus([4203]));
 
-    const result = await getCodexComputerUseRuntimeReconciler(client).repairAfterProbeFailure();
+    const result = await requireRuntimeReconciler(client).repairAfterProbeFailure();
 
-    expect(runtimeMocks.ensureService).toHaveBeenCalledWith({
-      ...runtimeContext(),
-      forceRevalidate: true,
-    });
+    expect(runtimeMocks.ensureService).toHaveBeenCalledWith(serviceParams(true));
     expect(runtimeMocks.killChildren).toHaveBeenCalledWith({ ancestorPid: 4103 });
     expect(result.killedPids).toEqual([4203]);
   });
@@ -81,7 +118,7 @@ describe("Codex Computer Use runtime reconciliation", () => {
       return { status: "already_current", changed: false };
     });
     runtimeMocks.killChildren.mockResolvedValue(repairStatus([4204]));
-    const reconciler = getCodexComputerUseRuntimeReconciler(client);
+    const reconciler = requireRuntimeReconciler(client);
 
     const first = reconciler.repairAfterProbeFailure();
     const second = reconciler.repairAfterProbeFailure();
@@ -92,7 +129,25 @@ describe("Codex Computer Use runtime reconciliation", () => {
     expect(runtimeMocks.ensureService).toHaveBeenCalledTimes(1);
     expect(runtimeMocks.killChildren).toHaveBeenCalledTimes(1);
   });
+
+  it("does not attach automatic repair outside a managed isolated runtime", () => {
+    const client = createClient(4106);
+    runtimeMocks.readContext.mockReturnValue(undefined);
+
+    expect(getCodexComputerUseRuntimeReconciler(client)).toBeUndefined();
+    expect(runtimeMocks.ensureService).not.toHaveBeenCalled();
+    expect(runtimeMocks.killChildren).not.toHaveBeenCalled();
+    expect(runtimeMocks.retireClient).not.toHaveBeenCalled();
+  });
 });
+
+function requireRuntimeReconciler(client: CodexAppServerClient) {
+  const reconciler = getCodexComputerUseRuntimeReconciler(client);
+  if (!reconciler) {
+    throw new Error("expected a managed isolated Computer Use runtime reconciler");
+  }
+  return reconciler;
+}
 
 function createClient(pid: number): CodexAppServerClient {
   return { getTransportPid: () => pid } as CodexAppServerClient;
@@ -104,6 +159,10 @@ function runtimeContext() {
     ownershipRoot: "/owned/agent",
     appServerCommand: "/Applications/ChatGPT.app/Contents/Resources/codex",
   };
+}
+
+function serviceParams(forceRevalidate: boolean) {
+  return { ...runtimeContext(), forceRevalidate };
 }
 
 function repairStatus(killedPids: number[]) {

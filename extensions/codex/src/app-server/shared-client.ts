@@ -210,11 +210,11 @@ export function resolveCodexAppServerSpawnIdentity(
   };
 }
 
-class CodexAppServerStartSelectionChangedError extends Error {
+export class CodexAppServerStartSelectionChangedError extends Error {
   readonly code = "CODEX_APP_SERVER_START_SELECTION_CHANGED";
 
-  constructor() {
-    super("Codex app-server managed executable selection changed during startup");
+  constructor(message = "Codex app-server managed executable selection changed during startup") {
+    super(message);
     this.name = "CodexAppServerStartSelectionChangedError";
   }
 }

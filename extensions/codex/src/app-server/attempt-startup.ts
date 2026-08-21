@@ -309,6 +309,9 @@ export async function startCodexAttemptThread(params: {
                 signal: startupAbandonController.signal,
               });
             } catch (error) {
+              if (isCodexAppServerStartSelectionChangedError(error)) {
+                throw error;
+              }
               if (startupAbandonController.signal.aborted) {
                 throw error;
               }

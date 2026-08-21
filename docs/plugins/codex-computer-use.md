@@ -155,10 +155,15 @@ OpenClaw serializes native Codex config reads and Computer Use installation
 inside one running Gateway. A separate Codex process or another Gateway is not
 part of that fence. After changing native Codex plugin config outside the
 Gateway, restart the Gateway and start a new chat before relying on the new
-selection. Restart the Gateway after updating the selected ChatGPT or Codex
-desktop app as well; cold app-server startup then verifies and, when needed,
-refreshes each isolated home's signed Computer Use service before launching it.
-Warm clients are intentionally not polled for desktop bundle changes.
+selection. For an OpenClaw-managed isolated home, each Computer Use request
+checks the selected ChatGPT or Codex desktop bundle generation. After a desktop
+update, OpenClaw verifies and refreshes that isolated home's signed service,
+retires only the affected warm app-server, and retries startup once against the
+current desktop generation; the Gateway itself does not need to restart.
+Explicit `CODEX_HOME` overrides and user-scoped homes remain operator-owned and
+retain their configured repair behavior. Warm clients are not continuously
+polled solely for desktop bundle changes; request-time checks and explicitly
+enabled periodic health checks use the same managed-runtime reconciliation.
 
 ## Commands
 
