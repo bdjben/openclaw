@@ -145,7 +145,7 @@ async function reconcileOnce(params: {
     ancestorPid: params.client.getTransportPid(),
   });
   return {
-    serviceChanged: Boolean(service?.changed),
+    serviceChanged: service?.changed ?? false,
     ...(service?.sourceBuild ? { sourceBuild: service.sourceBuild } : {}),
     processRepair: service?.changed
       ? {

@@ -113,8 +113,8 @@ async function ensureMarketplaceConfig(
   marketplacePath: string,
 ): Promise<boolean> {
   const configPath = path.join(codexHome, CONFIG_FILENAME);
-  const existing = await fs.readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") {
+  const existing = await fs.readFile(configPath, "utf8").catch((error: unknown) => {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return "";
     }
     throw error;
