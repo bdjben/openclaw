@@ -1,6 +1,7 @@
 /** Prepares Codex's reserved bundled marketplace inside an isolated agent home. */
 import fs from "node:fs/promises";
 import path from "node:path";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { ResolvedCodexComputerUseConfig } from "./config.js";
 import { resolveFirstExistingMacOSDesktopCodexBundledMarketplacePath } from "./desktop-app-paths.js";
@@ -158,8 +159,4 @@ function readOrCreateTable(parent: Record<string, unknown>, key: string): Record
   const table: Record<string, unknown> = {};
   parent[key] = table;
   return table;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
