@@ -13,6 +13,20 @@ const sharedClientMocks = vi.hoisted(() => ({
   getLeasedSharedCodexAppServerClient: vi.fn(),
   releaseLeasedSharedCodexAppServerClient: vi.fn(),
 }));
+const runtimeRepairMocks = vi.hoisted(() => ({
+  synchronizeBeforeRequest: vi.fn(async () => undefined),
+  repairAfterProbeFailure: vi.fn(async () => ({
+    attempted: true,
+    killedPids: [4321],
+    warnings: [],
+    message: "Replaced the incompatible Computer Use client.",
+  })),
+  getReconciler: vi.fn(),
+}));
+runtimeRepairMocks.getReconciler.mockReturnValue({
+  synchronizeBeforeRequest: runtimeRepairMocks.synchronizeBeforeRequest,
+  repairAfterProbeFailure: runtimeRepairMocks.repairAfterProbeFailure,
+});
 
 vi.mock("./request.js", () => ({
   requestCodexAppServerJson: requestCodexAppServerJsonMock,
@@ -21,6 +35,10 @@ vi.mock("./request.js", () => ({
 vi.mock("./shared-client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./shared-client.js")>()),
   ...sharedClientMocks,
+}));
+
+vi.mock("./computer-use-runtime-repair.js", () => ({
+  getCodexComputerUseRuntimeReconciler: runtimeRepairMocks.getReconciler,
 }));
 
 import {
@@ -81,6 +99,9 @@ describe("Codex Computer Use setup", () => {
     requestCodexAppServerJsonMock.mockReset();
     sharedClientMocks.getLeasedSharedCodexAppServerClient.mockReset();
     sharedClientMocks.releaseLeasedSharedCodexAppServerClient.mockReset();
+    runtimeRepairMocks.getReconciler.mockClear();
+    runtimeRepairMocks.synchronizeBeforeRequest.mockClear();
+    runtimeRepairMocks.repairAfterProbeFailure.mockClear();
   });
 
   it("stays disabled until configured", async () => {
@@ -431,6 +452,29 @@ describe("Codex Computer Use setup", () => {
       killedPids: [1234],
     });
     expect(repairComputerUseMcpChildren).toHaveBeenCalledTimes(1);
+    expect(
+      requestCalls(request).filter(([method]) => method === "mcpServer/tool/call"),
+    ).toHaveLength(2);
+  });
+
+  it("repairs a live client compatibility failure even when optional auto-repair is off", async () => {
+    const request = createComputerUseRequest({ installed: true, liveTestFailures: 1 });
+    const client = { request } as never;
+
+    const status = await ensureCodexComputerUse({
+      pluginConfig: { computerUse: { enabled: true, marketplaceName: "desktop-tools" } },
+      client,
+    });
+
+    expect(runtimeRepairMocks.getReconciler).toHaveBeenCalledWith(client);
+    expect(runtimeRepairMocks.synchronizeBeforeRequest).toHaveBeenCalledTimes(1);
+    expect(runtimeRepairMocks.repairAfterProbeFailure).toHaveBeenCalledTimes(1);
+    expect(status.liveTest).toMatchObject({
+      status: "passed",
+      attempts: 2,
+      retried: true,
+      repaired: true,
+    });
     expect(
       requestCalls(request).filter(([method]) => method === "mcpServer/tool/call"),
     ).toHaveLength(2);

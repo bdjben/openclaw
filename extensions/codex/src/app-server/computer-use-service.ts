@@ -34,7 +34,11 @@ const INSPECT_TIMEOUT_MS = 30_000;
 const COMPLETED_SYNC_CACHE_MAX_ENTRIES = 64;
 const activeInstalls = new Map<
   string,
-  { syncKey: string; promise: Promise<CodexComputerUseServiceStatus> }
+  {
+    syncKey: string;
+    forceRevalidate: boolean;
+    promise: Promise<CodexComputerUseServiceStatus>;
+  }
 >();
 const completedSyncs = new Map<
   string,
@@ -81,6 +85,7 @@ export async function ensureCodexComputerUseServiceApp(params: {
   sourceAppCandidates?: readonly string[];
   copyServiceApp?: CopyServiceApp;
   inspectServiceApp?: InspectServiceApp;
+  forceRevalidate?: boolean;
 }): Promise<CodexComputerUseServiceStatus> {
   const platform = params.platform ?? process.platform;
   if (platform !== "darwin") {
@@ -98,7 +103,7 @@ export async function ensureCodexComputerUseServiceApp(params: {
   const sourceKeys = await Promise.all(candidates.map(readServiceAppFilesystemKey));
   const syncKey = [targetPath, ...candidates, ...sourceKeys].join("\0");
   const completed = completedSyncs.get(targetPath);
-  if (completed?.syncKey === syncKey) {
+  if (!params.forceRevalidate && completed?.syncKey === syncKey) {
     // Keep frequently reused homes while bounding dynamic-agent history.
     completedSyncs.delete(targetPath);
     completedSyncs.set(targetPath, completed);
@@ -112,7 +117,7 @@ export async function ensureCodexComputerUseServiceApp(params: {
   }
   const active = activeInstalls.get(targetPath);
   if (active) {
-    if (active.syncKey === syncKey) {
+    if (active.syncKey === syncKey && (!params.forceRevalidate || active.forceRevalidate)) {
       return await active.promise;
     }
     await active.promise.catch(() => undefined);
@@ -142,7 +147,11 @@ export async function ensureCodexComputerUseServiceApp(params: {
     }
     return result;
   });
-  const activeEntry = { syncKey, promise: install };
+  const activeEntry = {
+    syncKey,
+    forceRevalidate: Boolean(params.forceRevalidate),
+    promise: install,
+  };
   activeInstalls.set(targetPath, activeEntry);
   const clearActive = () => {
     if (activeInstalls.get(targetPath) === activeEntry) {

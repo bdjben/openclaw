@@ -373,6 +373,77 @@ describe("Codex Computer Use native service", () => {
     await expect(inspectServiceFixture(targetPath)).resolves.toEqual(UNEXPECTED_IDENTITY);
   });
 
+  it("force-revalidates a cached target after a live compatibility failure", async () => {
+    const root = tempDirs.make("openclaw-computer-use-service-");
+    const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+    const codexHome = path.join(root, "codex-home");
+    const targetPath = path.join(codexHome, "computer-use", "Codex Computer Use.app");
+    await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+    const copyServiceApp = vi.fn(copyServiceFixture);
+
+    await ensureCodexComputerUseServiceApp({
+      codexHome,
+      platform: "darwin",
+      sourceAppCandidates: [sourcePath],
+      copyServiceApp,
+      inspectServiceApp: inspectServiceFixture,
+    });
+    await writeFixtureIdentity(targetPath, STALE_IDENTITY);
+
+    await expect(
+      ensureCodexComputerUseServiceApp({
+        codexHome,
+        platform: "darwin",
+        sourceAppCandidates: [sourcePath],
+        copyServiceApp,
+        inspectServiceApp: inspectServiceFixture,
+        forceRevalidate: true,
+      }),
+    ).resolves.toMatchObject({
+      status: "refreshed",
+      previousBuild: "1000502",
+      sourceBuild: "1000761",
+    });
+    expect(copyServiceApp).toHaveBeenCalledTimes(2);
+    await expect(inspectServiceFixture(targetPath)).resolves.toEqual(CURRENT_IDENTITY);
+  });
+
+  it("force-revalidates after an overlapping ordinary synchronization completes", async () => {
+    const root = tempDirs.make("openclaw-computer-use-service-");
+    const sourcePath = path.join(root, "source", "Codex Computer Use.app");
+    const codexHome = path.join(root, "codex-home");
+    await writeServiceFixture(sourcePath, CURRENT_IDENTITY);
+    const copyStarted = createDeferred<void>();
+    const copyGate = createDeferred<void>();
+    const copyServiceApp = vi.fn(async (source: string, target: string) => {
+      copyStarted.resolve();
+      await copyGate.promise;
+      await copyServiceFixture(source, target);
+    });
+
+    const ordinary = ensureCodexComputerUseServiceApp({
+      codexHome,
+      platform: "darwin",
+      sourceAppCandidates: [sourcePath],
+      copyServiceApp,
+      inspectServiceApp: inspectServiceFixture,
+    });
+    await copyStarted.promise;
+    const forced = ensureCodexComputerUseServiceApp({
+      codexHome,
+      platform: "darwin",
+      sourceAppCandidates: [sourcePath],
+      copyServiceApp,
+      inspectServiceApp: inspectServiceFixture,
+      forceRevalidate: true,
+    });
+    copyGate.resolve();
+
+    await expect(ordinary).resolves.toMatchObject({ status: "installed", changed: true });
+    await expect(forced).resolves.toMatchObject({ status: "already_current", changed: false });
+    expect(copyServiceApp).toHaveBeenCalledTimes(1);
+  });
+
   it("bounds completed synchronization state and re-inspects an evicted home", async () => {
     const root = tempDirs.make("openclaw-computer-use-service-cache-");
     const sourcePath = path.join(root, "source", "Codex Computer Use.app");

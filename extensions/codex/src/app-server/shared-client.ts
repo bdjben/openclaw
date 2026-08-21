@@ -87,6 +87,12 @@ type CodexAppServerClientStartMetadata = {
   nativeCommand?: string;
 };
 
+export type CodexComputerUseRuntimeContext = {
+  codexHome: string;
+  ownershipRoot: string;
+  appServerCommand: string;
+};
+
 /** Successful physical process identity, excluding environment and credentials. */
 type CodexAppServerClientProcessIdentity = {
   clientId: string;
@@ -154,6 +160,32 @@ export function readCodexAppServerClientProcessIdentity(
     ...resolveCodexAppServerSpawnIdentity(metadata.startOptions, metadata.nativeCommand),
     ...(runtimeIdentity?.serverVersion ? { serverVersion: runtimeIdentity.serverVersion } : {}),
     ...(runtimeIdentity?.userAgent ? { userAgent: runtimeIdentity.userAgent } : {}),
+  };
+}
+
+/** Reads the home-owned native Computer Use context for a running isolated client. */
+export function readCodexComputerUseRuntimeContext(
+  client: CodexAppServerClient,
+): CodexComputerUseRuntimeContext | undefined {
+  const metadata = getCodexAppServerClientStartMetadata().get(client);
+  const requested = metadata?.requestedStartOptions;
+  if (
+    !metadata ||
+    !requested ||
+    requested.transport !== "stdio" ||
+    requested.homeScope === "user" ||
+    requested.env?.CODEX_HOME?.trim()
+  ) {
+    return undefined;
+  }
+  const codexHome = client.getRuntimeIdentity()?.codexHome?.trim();
+  if (!codexHome) {
+    return undefined;
+  }
+  return {
+    codexHome,
+    ownershipRoot: metadata.agentDir,
+    appServerCommand: metadata.nativeCommand ?? metadata.startOptions.command,
   };
 }
 

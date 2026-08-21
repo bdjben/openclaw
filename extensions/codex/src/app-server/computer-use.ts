@@ -15,6 +15,7 @@ import {
   scopedRepairUnavailableStatus,
   type CodexComputerUseRepairStatus,
 } from "./computer-use-process-repair.js";
+import { getCodexComputerUseRuntimeReconciler } from "./computer-use-runtime-repair.js";
 import {
   resolveCodexAppServerRuntimeOptions,
   resolveCodexComputerUseConfig,
@@ -138,6 +139,7 @@ export type CodexComputerUseSetupParams = {
   defaultBundledMarketplacePath?: string;
   defaultBundledMarketplacePathCandidates?: readonly string[];
   repairComputerUseMcpChildren?: () => Promise<CodexComputerUseRepairStatus>;
+  repairComputerUseRuntime?: () => Promise<CodexComputerUseRepairStatus>;
 };
 
 type CodexComputerUseInspectionParams = {
@@ -153,6 +155,7 @@ type CodexComputerUseInspectionParams = {
   defaultBundledMarketplacePath?: string;
   defaultBundledMarketplacePathCandidates?: readonly string[];
   repairComputerUseMcpChildren?: () => Promise<CodexComputerUseRepairStatus>;
+  repairComputerUseRuntime?: () => Promise<CodexComputerUseRepairStatus>;
   releaseNativeConfigFence?: () => void;
 };
 
@@ -229,8 +232,16 @@ export async function ensureCodexComputerUse(
   if (!config.enabled) {
     return disabledStatus(config);
   }
+  const runtimeReconciler = params.client
+    ? getCodexComputerUseRuntimeReconciler(params.client)
+    : undefined;
+  await runtimeReconciler?.synchronizeBeforeRequest();
+  const preparedParams =
+    runtimeReconciler && !params.repairComputerUseRuntime
+      ? { ...params, repairComputerUseRuntime: runtimeReconciler.repairAfterProbeFailure }
+      : params;
   const status = await inspectCodexComputerUse({
-    ...params,
+    ...preparedParams,
     computerUseConfig: config,
     installPlugin: false,
   });
@@ -246,7 +257,7 @@ export async function ensureCodexComputerUse(
       throw new CodexComputerUseSetupError(blockedAutoInstallStatus);
     }
     const installedStatus = await inspectCodexComputerUse({
-      ...params,
+      ...preparedParams,
       computerUseConfig: config,
       installPlugin: true,
     });
@@ -413,6 +424,7 @@ async function inspectCodexComputerUseWithoutFence(
     plugin: pluginInspection.plugin,
     installPlugin: params.installPlugin,
     repairComputerUseMcpChildren,
+    repairComputerUseRuntime: params.repairComputerUseRuntime,
     releaseNativeConfigFence: params.releaseNativeConfigFence,
   });
 }
@@ -473,6 +485,7 @@ async function readComputerUseTools(params: {
   plugin: CodexPluginDetail;
   installPlugin: boolean;
   repairComputerUseMcpChildren?: () => Promise<CodexComputerUseRepairStatus>;
+  repairComputerUseRuntime?: () => Promise<CodexComputerUseRepairStatus>;
   releaseNativeConfigFence?: () => void;
 }): Promise<CodexComputerUseStatus> {
   let server = await readMcpServerStatus(params.request, params.config.mcpServerName);
@@ -514,6 +527,7 @@ async function readComputerUseTools(params: {
     request: params.request,
     config: params.config,
     repairComputerUseMcpChildren: params.repairComputerUseMcpChildren,
+    repairComputerUseRuntime: params.repairComputerUseRuntime,
   });
   const compatibilityStartupAllowed = !liveTest.ok && !params.config.strictReadiness;
   return {
@@ -558,6 +572,7 @@ export async function runCodexComputerUseLiveTest(params: {
   request: CodexComputerUseRequest;
   config: ResolvedCodexComputerUseConfig;
   repairComputerUseMcpChildren?: () => Promise<CodexComputerUseRepairStatus>;
+  repairComputerUseRuntime?: () => Promise<CodexComputerUseRepairStatus>;
 }): Promise<{ liveTest: CodexComputerUseLiveTestStatus; repair?: CodexComputerUseRepairStatus }> {
   const startedAt = Date.now();
   let lastError: unknown;
@@ -610,7 +625,9 @@ export async function runCodexComputerUseLiveTest(params: {
       if (attempt >= COMPUTER_USE_LIVE_TEST_RETRY_COUNT) {
         break;
       }
-      if (params.config.autoRepair) {
+      if (params.repairComputerUseRuntime) {
+        repair = await params.repairComputerUseRuntime();
+      } else if (params.config.autoRepair) {
         repair = params.repairComputerUseMcpChildren
           ? await params.repairComputerUseMcpChildren()
           : scopedRepairUnavailableStatus();

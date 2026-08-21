@@ -83,6 +83,7 @@ import {
   assertCodexAppServerClientStartSelectionCurrent,
   getSharedCodexAppServerClient,
   readCodexAppServerClientProcessIdentity,
+  readCodexComputerUseRuntimeContext,
 } from "./shared-client.js";
 
 let listCodexAppServerModels: typeof import("./models.js").listCodexAppServerModels;
@@ -107,10 +108,11 @@ let withLeasedCodexAppServerClientStartSelectionRetry: typeof import("./shared-c
 async function sendInitializeResult(
   harness: ReturnType<typeof createClientHarness>,
   userAgent: string,
+  runtimeIdentity: Record<string, unknown> = {},
 ): Promise<void> {
   await vi.waitFor(() => expect(harness.writes.length).toBeGreaterThanOrEqual(1));
   const initialize = JSON.parse(harness.writes[0] ?? "{}") as { id?: number };
-  harness.send({ id: initialize.id, result: { userAgent } });
+  harness.send({ id: initialize.id, result: { userAgent, ...runtimeIdentity } });
 }
 
 async function sendEmptyModelList(harness: ReturnType<typeof createClientHarness>): Promise<void> {
@@ -699,7 +701,8 @@ describe("shared Codex app-server client", () => {
         startOptions,
         agentDir,
       });
-      await sendInitializeResult(harness, "openclaw/0.147.0 (macOS; test)");
+      const codexHome = path.join(agentDir, "codex-home");
+      await sendInitializeResult(harness, "openclaw/0.147.0 (macOS; test)", { codexHome });
       const client = await clientPromise;
 
       expect(readCodexAppServerClientProcessIdentity(client)).toEqual({
@@ -710,6 +713,11 @@ describe("shared Codex app-server client", () => {
         nativeCommand: "/cache/openclaw/codex.native",
         serverVersion: "0.147.0",
         userAgent: "openclaw/0.147.0 (macOS; test)",
+      });
+      expect(readCodexComputerUseRuntimeContext(client)).toEqual({
+        codexHome,
+        ownershipRoot: agentDir,
+        appServerCommand: "/cache/openclaw/codex.native",
       });
 
       expect(() =>

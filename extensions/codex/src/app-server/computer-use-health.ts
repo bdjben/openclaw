@@ -5,6 +5,7 @@ import {
   killStaleComputerUseMcpChildren,
   type CodexComputerUseRepairStatus,
 } from "./computer-use-process-repair.js";
+import { getCodexComputerUseRuntimeReconciler } from "./computer-use-runtime-repair.js";
 import { runCodexComputerUseLiveTest } from "./computer-use.js";
 import type { ResolvedCodexComputerUseConfig } from "./config.js";
 
@@ -12,6 +13,7 @@ type ComputerUseHealthMonitor = {
   fingerprint: string;
   intervalMs: number;
   repairComputerUseMcpChildren?: () => Promise<CodexComputerUseRepairStatus>;
+  repairComputerUseRuntime?: () => Promise<CodexComputerUseRepairStatus>;
   timer: ReturnType<typeof setInterval>;
   disposeCloseHandler: () => void;
   running: boolean;
@@ -37,6 +39,7 @@ export function startCodexComputerUseHealthMonitor(params: {
   client: CodexAppServerClient;
   config: ResolvedCodexComputerUseConfig;
   repairComputerUseMcpChildren?: () => Promise<CodexComputerUseRepairStatus>;
+  repairComputerUseRuntime?: () => Promise<CodexComputerUseRepairStatus>;
 }): { started: boolean; intervalMs?: number; reason?: string } {
   const state = getComputerUseHealthMonitorState();
   const existing = state.monitors.get(params.client);
@@ -49,11 +52,17 @@ export function startCodexComputerUseHealthMonitor(params: {
       reason: params.config.enabled ? "health_disabled" : "disabled",
     };
   }
+  const repairComputerUseRuntime =
+    params.repairComputerUseRuntime ??
+    (params.repairComputerUseMcpChildren
+      ? undefined
+      : getCodexComputerUseRuntimeReconciler(params.client).repairAfterProbeFailure);
   const fingerprint = buildComputerUseHealthMonitorFingerprint(params.config);
   const intervalMs = params.config.healthCheckIntervalMinutes * 60_000;
   if (
     existing?.fingerprint === fingerprint &&
-    existing.repairComputerUseMcpChildren === params.repairComputerUseMcpChildren
+    existing.repairComputerUseMcpChildren === params.repairComputerUseMcpChildren &&
+    existing.repairComputerUseRuntime === repairComputerUseRuntime
   ) {
     return { started: false, intervalMs, reason: "already_started" };
   }
@@ -67,9 +76,11 @@ export function startCodexComputerUseHealthMonitor(params: {
     fingerprint,
     intervalMs,
     repairComputerUseMcpChildren: params.repairComputerUseMcpChildren,
+    repairComputerUseRuntime,
     timer: setInterval(() => {
       void runCodexComputerUseHealthProbe(params.client, params.config, monitor, {
         repairComputerUseMcpChildren,
+        repairComputerUseRuntime,
       });
     }, intervalMs),
     disposeCloseHandler: () => undefined,
@@ -102,6 +113,7 @@ async function runCodexComputerUseHealthProbe(
   monitor: ComputerUseHealthMonitor,
   options: {
     repairComputerUseMcpChildren?: () => Promise<CodexComputerUseRepairStatus>;
+    repairComputerUseRuntime?: () => Promise<CodexComputerUseRepairStatus>;
   },
 ): Promise<void> {
   if (monitor.running) {
@@ -112,6 +124,7 @@ async function runCodexComputerUseHealthProbe(
     const { liveTest, repair } = await runCodexComputerUseLiveTest({
       config,
       repairComputerUseMcpChildren: options.repairComputerUseMcpChildren,
+      repairComputerUseRuntime: options.repairComputerUseRuntime,
       request: async <T>(
         method: string,
         requestParams?: unknown,

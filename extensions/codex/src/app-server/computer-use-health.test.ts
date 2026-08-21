@@ -69,6 +69,34 @@ describe("Codex Computer Use periodic health", () => {
     expect(repairComputerUseMcpChildren).toHaveBeenCalledTimes(1);
   });
 
+  it("repairs a failed live handshake even when optional auto-repair is off", async () => {
+    vi.useFakeTimers();
+    const client = createClient({ liveTestFailures: 1 });
+    const repairComputerUseRuntime = vi.fn(async () => ({
+      attempted: true,
+      killedPids: [5678],
+      warnings: [],
+      message: "Revalidated the signed service and replaced the incompatible native client.",
+    }));
+
+    startCodexComputerUseHealthMonitor({
+      client: client.client,
+      config: computerUseConfig({
+        autoRepair: false,
+        healthCheckEnabled: true,
+        healthCheckIntervalMinutes: 30,
+      }),
+      repairComputerUseRuntime,
+    });
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+
+    expect(
+      client.request.mock.calls.filter(([method]) => method === "mcpServer/tool/call"),
+    ).toHaveLength(2);
+    expect(repairComputerUseRuntime).toHaveBeenCalledTimes(1);
+  });
+
   it("stops an existing monitor when health checks are disabled", async () => {
     vi.useFakeTimers();
     const client = createClient();
