@@ -3,6 +3,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import {
+  assertDirectoryIdentityStable,
+  assertNotSymlink,
+  directoryIdentityIsStable,
+  ensureOwnedCodexHome,
+  prepareOwnedServiceParent,
+  readRealDirectoryIdentity,
+} from "./computer-use-service-path.js";
 import type { ResolvedCodexComputerUseConfig } from "./config.js";
 import { resolveFirstExistingMacOSDesktopCodexBundledMarketplacePath } from "./desktop-app-paths.js";
 
@@ -24,6 +32,7 @@ type CodexComputerUseBundledMarketplaceResult = {
  */
 export async function ensureCodexComputerUseBundledMarketplace(params: {
   codexHome: string;
+  ownershipRoot: string;
   config: ResolvedCodexComputerUseConfig;
   bundledMarketplacePath?: string;
   bundledMarketplacePathCandidates?: readonly string[];
@@ -48,14 +57,31 @@ export async function ensureCodexComputerUseBundledMarketplace(params: {
     return { status: "source_missing", changed: false };
   }
 
+  const codexHome = path.resolve(params.codexHome);
+  const ownershipRoot = path.resolve(params.ownershipRoot);
+  await ensureOwnedCodexHome(codexHome, ownershipRoot);
+  const marketplaceParent = path.join(codexHome, ".tmp", "bundled-marketplaces");
+  const ownedMarketplaceParent = await prepareOwnedServiceParent({
+    ownershipRoot,
+    codexHome,
+    targetParent: marketplaceParent,
+  });
+  const ownedCodexHome = await readRealDirectoryIdentity(codexHome, "isolated Codex home");
   const marketplacePath = path.join(
-    params.codexHome,
+    codexHome,
     ".tmp",
     "bundled-marketplaces",
     BUNDLED_MARKETPLACE_NAME,
   );
-  const linkChanged = await ensureMarketplaceSymlink(marketplacePath, sourcePath);
-  const configChanged = await ensureMarketplaceConfig(params.codexHome, marketplacePath);
+  const linkChanged = await ensureMarketplaceSymlink({
+    ownedParent: ownedMarketplaceParent,
+    targetPath: path.join(ownedMarketplaceParent.realPath, BUNDLED_MARKETPLACE_NAME),
+    sourcePath,
+  });
+  const configChanged = await ensureMarketplaceConfig({
+    ownedCodexHome,
+    marketplacePath,
+  });
   return {
     status: "ready",
     changed: linkChanged || configChanged,
@@ -64,61 +90,104 @@ export async function ensureCodexComputerUseBundledMarketplace(params: {
   };
 }
 
-async function ensureMarketplaceSymlink(targetPath: string, sourcePath: string): Promise<boolean> {
-  const parentPath = path.dirname(targetPath);
-  await fs.mkdir(parentPath, { recursive: true });
-  const current = await fs.lstat(targetPath).catch(() => undefined);
+type OwnedDirectoryIdentity = Awaited<ReturnType<typeof readRealDirectoryIdentity>>;
+
+async function ensureMarketplaceSymlink(params: {
+  ownedParent: OwnedDirectoryIdentity;
+  targetPath: string;
+  sourcePath: string;
+}): Promise<boolean> {
+  const { ownedParent, sourcePath, targetPath } = params;
+  await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
+  const current = await fs.lstat(targetPath).catch((error: unknown) => {
+    if (hasNodeErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    throw error;
+  });
   if (current?.isSymbolicLink()) {
     const currentTarget = await fs.readlink(targetPath);
-    if (path.resolve(parentPath, currentTarget) === path.resolve(sourcePath)) {
+    await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
+    if (path.resolve(ownedParent.realPath, currentTarget) === path.resolve(sourcePath)) {
       return false;
     }
   }
 
   const stagingPath = path.join(
-    parentPath,
+    ownedParent.realPath,
     `.${BUNDLED_MARKETPLACE_NAME}.staging-${process.pid}-${Date.now()}`,
   );
   const backupPath = path.join(
-    parentPath,
+    ownedParent.realPath,
     `.${BUNDLED_MARKETPLACE_NAME}.backup-${process.pid}-${Date.now()}`,
   );
+  await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
   await fs.symlink(sourcePath, stagingPath, "dir");
   let backupCreated = false;
   try {
+    await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
     if (current) {
       await fs.rename(targetPath, backupPath);
+      await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
       backupCreated = true;
     }
     try {
+      await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
       await fs.rename(stagingPath, targetPath);
+      await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
     } catch (error) {
-      if (backupCreated) {
+      if (
+        backupCreated &&
+        (await directoryIdentityIsStable(ownedParent)) &&
+        !(await pathExists(targetPath))
+      ) {
+        await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
         await fs.rename(backupPath, targetPath);
+        await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
         backupCreated = false;
       }
       throw error;
     }
     if (backupCreated) {
-      await fs.rm(backupPath, { recursive: true, force: true });
+      await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
+      await removeMarketplaceEntry(backupPath);
+      await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
+      backupCreated = false;
     }
     return true;
+  } catch (error) {
+    if (
+      backupCreated &&
+      (await directoryIdentityIsStable(ownedParent)) &&
+      !(await pathExists(targetPath))
+    ) {
+      await assertDirectoryIdentityStable(ownedParent, "Computer Use marketplace parent");
+      await fs.rename(backupPath, targetPath);
+      backupCreated = false;
+    }
+    throw error;
   } finally {
-    await fs.rm(stagingPath, { force: true });
+    if (await directoryIdentityIsStable(ownedParent)) {
+      await fs.rm(stagingPath, { force: true });
+    }
   }
 }
 
-async function ensureMarketplaceConfig(
-  codexHome: string,
-  marketplacePath: string,
-): Promise<boolean> {
-  const configPath = path.join(codexHome, CONFIG_FILENAME);
+async function ensureMarketplaceConfig(params: {
+  ownedCodexHome: OwnedDirectoryIdentity;
+  marketplacePath: string;
+}): Promise<boolean> {
+  const { marketplacePath, ownedCodexHome } = params;
+  const configPath = path.join(ownedCodexHome.realPath, CONFIG_FILENAME);
+  await assertDirectoryIdentityStable(ownedCodexHome, "isolated Codex home");
+  await assertNotSymlink(configPath, "Codex config");
   const existing = await fs.readFile(configPath, "utf8").catch((error: unknown) => {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+    if (hasNodeErrorCode(error, "ENOENT")) {
       return "";
     }
     throw error;
   });
+  await assertDirectoryIdentityStable(ownedCodexHome, "isolated Codex home");
   const parsedValue: unknown = existing.trim()
     ? parseToml(existing, { integersAsBigInt: true })
     : {};
@@ -135,20 +204,57 @@ async function ensureMarketplaceConfig(
   bundled.source = marketplacePath;
 
   const serialized = stringifyToml(parsed);
-  const existingStat = await fs.stat(configPath).catch(() => undefined);
+  await assertNotSymlink(configPath, "Codex config");
+  const existingStat = await fs.lstat(configPath).catch((error: unknown) => {
+    if (hasNodeErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    throw error;
+  });
   const stagingPath = path.join(
-    codexHome,
+    ownedCodexHome.realPath,
     `.${CONFIG_FILENAME}.staging-${process.pid}-${Date.now()}`,
   );
   try {
+    await assertDirectoryIdentityStable(ownedCodexHome, "isolated Codex home");
     await fs.writeFile(stagingPath, serialized, {
       mode: existingStat ? existingStat.mode & 0o777 : 0o600,
     });
+    await assertDirectoryIdentityStable(ownedCodexHome, "isolated Codex home");
+    await assertNotSymlink(configPath, "Codex config");
     await fs.rename(stagingPath, configPath);
+    await assertDirectoryIdentityStable(ownedCodexHome, "isolated Codex home");
   } finally {
-    await fs.rm(stagingPath, { force: true });
+    if (await directoryIdentityIsStable(ownedCodexHome)) {
+      await fs.rm(stagingPath, { force: true });
+    }
   }
   return true;
+}
+
+async function removeMarketplaceEntry(entryPath: string): Promise<void> {
+  const entry = await fs.lstat(entryPath);
+  if (entry.isDirectory() && !entry.isSymbolicLink()) {
+    await fs.rm(entryPath, { recursive: true, force: true });
+    return;
+  }
+  await fs.unlink(entryPath);
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.lstat(filePath);
+    return true;
+  } catch (error) {
+    if (hasNodeErrorCode(error, "ENOENT")) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function hasNodeErrorCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === code);
 }
 
 function readOrCreateTable(parent: Record<string, unknown>, key: string): Record<string, unknown> {

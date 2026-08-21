@@ -31,6 +31,7 @@ import {
 import type { CodexAppServerClient } from "./client.js";
 import { ensureCodexComputerUseSharedPluginCache } from "./computer-use-cache.js";
 import { ensureCodexComputerUseBundledMarketplace } from "./computer-use-marketplace.js";
+import { ensureOwnedCodexHome } from "./computer-use-service-path.js";
 import { ensureCodexComputerUseServiceApp } from "./computer-use-service.js";
 import {
   resolveCodexComputerUseConfig,
@@ -523,16 +524,21 @@ async function withCodexHomeEnvironment(
   const nativeHome = startOptions.env?.[HOME_ENV_VAR]?.trim()
     ? startOptions.env[HOME_ENV_VAR]
     : undefined;
-  await fs.mkdir(codexHome, { recursive: true });
   const computerUseConfig = resolveCodexComputerUseConfig({ pluginConfig });
   const ownsIsolatedCodexHome =
     startOptions.homeScope !== "user" && !startOptions.env?.[CODEX_HOME_ENV_VAR]?.trim();
+  if (ownsIsolatedCodexHome) {
+    await ensureOwnedCodexHome(codexHome, agentDir);
+  } else {
+    await fs.mkdir(codexHome, { recursive: true });
+  }
   const configFenceKey = `codex-home:${path.resolve(codexHome)}`;
   const releaseConfigFence = await acquireCodexNativeConfigFence(configFenceKey);
   try {
     if (ownsIsolatedCodexHome) {
       await ensureCodexComputerUseBundledMarketplace({
         codexHome,
+        ownershipRoot: agentDir,
         config: computerUseConfig,
       });
     }
