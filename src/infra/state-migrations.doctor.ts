@@ -21,6 +21,10 @@ import { resolveSessionStoreTargets } from "../config/sessions/targets.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
+  createPluginBlobStoreForDoctor,
+  type OpenBlobStoreOptions,
+} from "../plugin-state/plugin-blob-store.js";
+import {
   createPluginStateKeyedStore,
   getPluginStateCapacity as resolvePluginStateCapacity,
   importPluginStateEntriesForDoctor,
@@ -260,6 +264,9 @@ function createPluginDoctorStateMigrationContext(
   env: NodeJS.ProcessEnv,
 ): PluginDoctorStateMigrationContext {
   return {
+    openPluginBlobStore<TMetadata>(options: OpenBlobStoreOptions) {
+      return createPluginBlobStoreForDoctor<TMetadata>(pluginId, options, env);
+    },
     getPluginStateCapacity() {
       return resolvePluginStateCapacity(pluginId, env);
     },

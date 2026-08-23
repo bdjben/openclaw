@@ -1,5 +1,8 @@
 /** Lazy store facade that keeps binding schema/auth code off plugin startup. */
-import type { PluginStateSyncKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type {
+  PluginBlobStore,
+  PluginStateSyncKeyedStore,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createCodexManagedThreadStore,
   type CodexManagedThreadStore,
@@ -8,10 +11,19 @@ import {
 import {
   CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
   CODEX_APP_SERVER_BINDING_NAMESPACE,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
 } from "./session-binding-meta.js";
 import type { CodexAppServerBindingStore, StoredCodexAppServerBinding } from "./session-binding.js";
 
-export { CODEX_APP_SERVER_BINDING_MAX_ENTRIES, CODEX_APP_SERVER_BINDING_NAMESPACE };
+export {
+  CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+  CODEX_APP_SERVER_BINDING_NAMESPACE,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
+};
 export type { StoredCodexAppServerBinding } from "./session-binding.js";
 
 /** Defers schema compilation and auth loading until the first binding operation. */
@@ -20,6 +32,10 @@ export function createLazyCodexAppServerBindingStore(
     PluginStateSyncKeyedStore<StoredCodexAppServerBinding>,
     "entries" | "lookup" | "update"
   >,
+  instructionBlobs: {
+    lookup: PluginBlobStore<{ version: 1; refCount: number }>["lookup"];
+    mutate: PluginBlobStore<{ version: 1; refCount: number }>["mutate"];
+  },
   managedThreadState?: Pick<
     PluginStateSyncKeyedStore<StoredCodexManagedThread>,
     "entries" | "registerIfAbsent"
@@ -28,7 +44,7 @@ export function createLazyCodexAppServerBindingStore(
   let resolved: Promise<CodexAppServerBindingStore> | undefined;
   const store = () =>
     (resolved ??= import("./session-binding.js").then(({ createCodexAppServerBindingStore }) =>
-      createCodexAppServerBindingStore(state),
+      createCodexAppServerBindingStore(state, instructionBlobs),
     ));
   const managedThreads: CodexManagedThreadStore | undefined = managedThreadState
     ? createCodexManagedThreadStore(managedThreadState)

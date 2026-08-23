@@ -12,6 +12,7 @@ import {
   pluginBlobDeleteExpired,
   pluginBlobEntries,
   pluginBlobLookup,
+  pluginBlobMutate,
   pluginBlobRegister,
   pluginBlobRegisterIfAbsent,
   type PluginBlobStoredEntry,
@@ -68,16 +69,19 @@ function invalidInput(
   });
 }
 
-function limitError(message: string): PluginBlobStoreError {
+function limitError(
+  message: string,
+  operation: PluginBlobStoreOperation = "register",
+): PluginBlobStoreError {
   return new PluginBlobStoreError(message, {
     code: "PLUGIN_BLOB_LIMIT_EXCEEDED",
-    operation: "register",
+    operation,
   });
 }
 
 const validationErrors = (operation: PluginBlobStoreOperation) => ({
   invalid: (message: string) => invalidInput(message, operation),
-  limit: (message: string) => limitError(message),
+  limit: (message: string) => limitError(message, operation),
 });
 
 function validateNamespace(value: string): string {
@@ -163,22 +167,25 @@ function prepareBlob(params: {
   maxBytesPerEntry: number;
   defaultTtlMs?: number;
   opts?: { ttlMs?: number };
+  operation?: "register" | "mutate";
 }): PreparedBlob {
-  const key = validateKey(params.key, "register");
+  const operation = params.operation ?? "register";
+  const key = validateKey(params.key, operation);
   if (!(params.bytes instanceof Uint8Array)) {
-    throw invalidInput("plugin blob bytes must be a Uint8Array");
+    throw invalidInput("plugin blob bytes must be a Uint8Array", operation);
   }
   if (params.bytes.byteLength > params.maxBytesPerEntry) {
     throw limitError(
       `plugin blob entry exceeds the configured ${params.maxBytesPerEntry} byte limit`,
+      operation,
     );
   }
   const metadataJson = serializePluginStoreJson({
     value: params.metadata,
     label: "plugin blob metadata",
-    errors: validationErrors("register"),
+    errors: validationErrors(operation),
   });
-  const ttlMs = validateTtl(params.opts?.ttlMs, "register") ?? params.defaultTtlMs;
+  const ttlMs = validateTtl(params.opts?.ttlMs, operation) ?? params.defaultTtlMs;
   return {
     key,
     bytes: Uint8Array.from(params.bytes),
@@ -221,10 +228,11 @@ function storedInfoToEntryInfo<TMetadata>(
 
 function storedEntryToEntry<TMetadata>(
   row: PluginBlobStoredEntry,
+  operation: "lookup" | "mutate",
   env?: NodeJS.ProcessEnv,
 ): PluginBlobEntry<TMetadata> {
   return {
-    ...storedInfoToEntryInfo<TMetadata>(row, "lookup", env),
+    ...storedInfoToEntryInfo<TMetadata>(row, operation, env),
     bytes: Uint8Array.from(row.blob),
   };
 }
@@ -267,6 +275,7 @@ function createPluginBlobStoreInternal<TMetadata>(
   });
 
   const writeParams = (blob: PreparedBlob) => ({
+    operation: "register" as const,
     pluginId,
     namespace,
     key: blob.key,
@@ -302,6 +311,41 @@ function createPluginBlobStoreInternal<TMetadata>(
       });
       return pluginBlobRegisterIfAbsent(writeParams(blob));
     },
+    async mutate(key, update) {
+      const normalizedKey = validateKey(key, "mutate");
+      return pluginBlobMutate({
+        operation: "mutate",
+        pluginId,
+        namespace,
+        key: normalizedKey,
+        maxEntries,
+        maxBytesPerNamespace,
+        overflowPolicy,
+        mutate: (row) => {
+          const current = row ? storedEntryToEntry<TMetadata>(row, "mutate", env) : undefined;
+          const next = update(current);
+          if (!next || next.kind === "delete") {
+            return next;
+          }
+          const blob = prepareBlob({
+            key: normalizedKey,
+            bytes: next.bytes,
+            metadata: next.metadata,
+            maxBytesPerEntry,
+            defaultTtlMs,
+            opts: next.ttlMs === undefined ? undefined : { ttlMs: next.ttlMs },
+            operation: "mutate",
+          });
+          return {
+            kind: "set",
+            bytes: blob.bytes,
+            metadataJson: blob.metadataJson,
+            ...(blob.ttlMs !== undefined ? { ttlMs: blob.ttlMs } : {}),
+          };
+        },
+        ...(env ? { env } : {}),
+      });
+    },
     async lookup(key) {
       const row = pluginBlobLookup({
         pluginId,
@@ -309,7 +353,7 @@ function createPluginBlobStoreInternal<TMetadata>(
         key: validateKey(key, "lookup"),
         ...(env ? { env } : {}),
       });
-      return row ? storedEntryToEntry<TMetadata>(row, env) : undefined;
+      return row ? storedEntryToEntry<TMetadata>(row, "lookup", env) : undefined;
     },
     async entries() {
       return pluginBlobEntries({ pluginId, namespace, ...(env ? { env } : {}) }).map((row) =>
@@ -358,6 +402,15 @@ export function createPluginBlobStore<TMetadata>(
   options: OpenBlobStoreOptions,
 ): PluginBlobStore<TMetadata> {
   return createPluginBlobStoreInternal<TMetadata>(pluginId, options);
+}
+
+/** Host-only factory used by doctor migrations with an explicit state environment. */
+export function createPluginBlobStoreForDoctor<TMetadata>(
+  pluginId: string,
+  options: OpenBlobStoreOptions,
+  env: NodeJS.ProcessEnv,
+): PluginBlobStore<TMetadata> {
+  return createPluginBlobStoreInternal<TMetadata>(pluginId, options, env);
 }
 
 /** Test-only factory with an isolated state environment. */

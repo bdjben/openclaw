@@ -1,6 +1,10 @@
 /** In-memory binding store helpers for Codex app-server tests. */
 export * from "./session-binding.js";
-import type { PluginStateSyncKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type {
+  PluginBlobEntry,
+  PluginBlobStore,
+  PluginStateSyncKeyedStore,
+} from "openclaw/plugin-sdk/plugin-state-runtime";
 import { resolveCodexSupervisionAppServerRuntimeOptions } from "./config.js";
 import { buildCodexAppServerConnectionFingerprint } from "./plugin-app-cache-key.js";
 import {
@@ -44,8 +48,42 @@ export function createCodexTestBindingStateStore(): PluginStateSyncKeyedStore<St
   };
 }
 
+export function createCodexTestInstructionBlobStore() {
+  type Metadata = { version: 1; refCount: number };
+  const values = new Map<string, PluginBlobEntry<Metadata>>();
+  const store: {
+    lookup: PluginBlobStore<Metadata>["lookup"];
+    mutate: PluginBlobStore<Metadata>["mutate"];
+  } = {
+    async lookup(key) {
+      return values.get(key);
+    },
+    async mutate(key, update) {
+      const next = update(values.get(key));
+      if (!next) {
+        return false;
+      }
+      if (next.kind === "delete") {
+        return values.delete(key);
+      }
+      values.set(key, {
+        key,
+        bytes: Uint8Array.from(next.bytes),
+        metadata: next.metadata,
+        sizeBytes: next.bytes.byteLength,
+        createdAt: Date.now(),
+      });
+      return true;
+    },
+  };
+  return { store, values };
+}
+
 export function createCodexTestBindingStore(): CodexAppServerBindingStore {
-  return createCodexAppServerBindingStore(createCodexTestBindingStateStore());
+  return createCodexAppServerBindingStore(
+    createCodexTestBindingStateStore(),
+    createCodexTestInstructionBlobStore().store,
+  );
 }
 
 export function buildCodexSupervisionTestConnectionFingerprint(
@@ -61,7 +99,11 @@ export function buildCodexSupervisionTestConnectionFingerprint(
 }
 
 const sharedStateStore = createCodexTestBindingStateStore();
-export const testCodexAppServerBindingStore = createCodexAppServerBindingStore(sharedStateStore);
+const sharedInstructionBlobs = createCodexTestInstructionBlobStore();
+export const testCodexAppServerBindingStore = createCodexAppServerBindingStore(
+  sharedStateStore,
+  sharedInstructionBlobs.store,
+);
 const testSessionIdentities = new Map<
   string,
   { agentId: string; sessionId: string; sessionKey?: string }
@@ -69,6 +111,7 @@ const testSessionIdentities = new Map<
 
 export function resetCodexTestBindingStore(): void {
   sharedStateStore.clear();
+  sharedInstructionBlobs.values.clear();
   testSessionIdentities.clear();
 }
 

@@ -24,6 +24,19 @@ export type PluginBlobStore<TMetadata> = {
     metadata: TMetadata,
     opts?: { ttlMs?: number },
   ): Promise<boolean>;
+  /**
+   * Atomically creates, replaces, or deletes one blob. The callback sees only a
+   * live entry; an explicit set/delete may replace/remove an expired stored row.
+   */
+  mutate(
+    key: string,
+    update: (
+      current: PluginBlobEntry<TMetadata> | undefined,
+    ) =>
+      | { kind: "set"; bytes: Uint8Array; metadata: TMetadata; ttlMs?: number }
+      | { kind: "delete" }
+      | undefined,
+  ): Promise<boolean>;
   lookup(key: string): Promise<PluginBlobEntry<TMetadata> | undefined>;
   entries(): Promise<PluginBlobEntryInfo<TMetadata>[]>;
   delete(key: string): Promise<boolean>;
@@ -54,6 +67,7 @@ export type PluginBlobStoreErrorCode =
 export type PluginBlobStoreOperation =
   | "open"
   | "register"
+  | "mutate"
   | "lookup"
   | "delete"
   | "entries"

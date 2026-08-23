@@ -11,6 +11,7 @@ import {
   sessionBindingIdentity,
 } from "./src/app-server/session-binding.js";
 import {
+  createCodexTestInstructionBlobStore,
   createCodexTestBindingStateStore,
   testCodexAppServerBindingStore,
 } from "./src/app-server/session-binding.test-helpers.js";
@@ -29,9 +30,11 @@ function createCodexTestRuntime(
   current?: () => unknown,
   stateStore = createCodexTestBindingStateStore(),
 ) {
+  const instructionBlobs = createCodexTestInstructionBlobStore();
   return {
     ...(current ? { config: { current } } : {}),
     state: {
+      openBlobStore: () => instructionBlobs.store,
       openSyncKeyedStore: () => stateStore,
     },
   } as never;

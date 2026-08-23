@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import type { PluginStateSyncKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
+  createPluginBlobStoreForTests,
   createPluginStateSyncKeyedStoreForTests,
+  resetPluginBlobStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
@@ -12,6 +14,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bindingStoreKey,
   CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
   createCodexAppServerBindingStore,
   createStoredCodexAppServerBinding,
   hashCodexAppServerBindingFingerprint,
@@ -56,6 +61,7 @@ function createStateStore() {
 
 afterEach(() => {
   vi.useRealTimers();
+  resetPluginBlobStoreForTests();
   resetPluginStateStoreForTests();
 });
 
@@ -95,6 +101,106 @@ describe("Codex app-server binding store", () => {
       state: "active",
       binding: { threadId: "thread-1" },
     });
+  });
+
+  it("stores oversized frozen instructions once and resumes identical bytes by reference", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-codex-binding-blob-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    try {
+      const state = createPluginStateSyncKeyedStoreForTests<StoredCodexAppServerBinding>("codex", {
+        namespace: "app-server-thread-bindings-large-test",
+        maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+        overflowPolicy: "reject-new",
+        env,
+      });
+      const blobs = createPluginBlobStoreForTests<{ version: 1; refCount: number }>(
+        "codex",
+        {
+          namespace: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
+          maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+          maxBytesPerEntry: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+          maxBytesPerNamespace: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+          overflowPolicy: "reject-new",
+        },
+        env,
+      );
+      const store = createCodexAppServerBindingStore(state, {
+        lookup: (key) => blobs.lookup(key),
+        mutate: (key, update) => blobs.mutate(key, update),
+      });
+      const instructions = `# Frozen policy\n${"multibyte-🦀\n".repeat(25_000)}`;
+      expect(Buffer.byteLength(instructions)).toBeGreaterThan(256 * 1024);
+      const identities = ["one", "two"].map((bindingId) => ({
+        kind: "conversation" as const,
+        bindingId,
+      }));
+
+      expect(() =>
+        state.register("legacy-too-large", {
+          version: 1,
+          state: "active",
+          binding: {
+            threadId: "thread-inline-overflow",
+            cwd: "/repo",
+            agentWorkspaceDeveloperInstructions: instructions,
+          },
+        } as unknown as StoredCodexAppServerBinding),
+      ).toThrow("65536 byte limit");
+
+      await Promise.all(
+        identities.map((identity, index) =>
+          store.mutate(identity, {
+            kind: "set",
+            binding: {
+              threadId: `thread-${index}`,
+              cwd: "/repo",
+              agentWorkspaceDeveloperInstructions: instructions,
+            },
+          }),
+        ),
+      ).then((results) => expect(results).toEqual([true, true]));
+
+      const rows = identities.map((identity) => state.lookup(bindingStoreKey(identity))!);
+      for (const row of rows) {
+        expect(Buffer.byteLength(JSON.stringify(row))).toBeLessThan(65_536);
+        expect(row).not.toHaveProperty("binding.agentWorkspaceDeveloperInstructions");
+      }
+      const references = rows.map((row) =>
+        row.state === "active" ? row.binding.agentWorkspaceDeveloperInstructionsRef : undefined,
+      );
+      expect(new Set(references).size).toBe(1);
+      const reference = references[0]!;
+      await expect(blobs.lookup(reference)).resolves.toMatchObject({
+        metadata: { version: 1, refCount: 2 },
+      });
+      for (const identity of identities) {
+        await expect(store.read(identity)).resolves.toMatchObject({
+          agentWorkspaceDeveloperInstructions: instructions,
+        });
+      }
+
+      const legacy = { kind: "conversation" as const, bindingId: "legacy-inline" };
+      const legacyInstructions = "Legacy frozen instructions.";
+      state.register(bindingStoreKey(legacy), {
+        version: 1,
+        state: "active",
+        binding: {
+          threadId: "thread-legacy",
+          cwd: "/repo",
+          agentWorkspaceDeveloperInstructions: legacyInstructions,
+        },
+      } as unknown as StoredCodexAppServerBinding);
+      await expect(store.read(legacy)).rejects.toThrow("Invalid Codex app-server binding row");
+
+      await store.mutate(identities[0]!, { kind: "clear" });
+      await expect(blobs.lookup(reference)).resolves.toMatchObject({ metadata: { refCount: 1 } });
+      await store.mutate(identities[1]!, { kind: "clear" });
+      await expect(blobs.lookup(reference)).resolves.toBeUndefined();
+    } finally {
+      resetPluginBlobStoreForTests();
+      resetPluginStateStoreForTests();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("replaces only the exact ordinary thread owner", async () => {

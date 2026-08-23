@@ -4047,7 +4047,6 @@ describe("runCodexAppServerAttempt", () => {
       injectedChars: agentsGuidance.length,
       truncated: false,
     });
-
     const updatedGuidance = "Updated AGENTS guidance must wait for a new session.";
     await fs.writeFile(path.join(agentWorkspaceDir, "AGENTS.md"), updatedGuidance);
     const resumeHarness = createResumeHarness();
@@ -4068,6 +4067,64 @@ describe("runCodexAppServerAttempt", () => {
       (threadResume.params as { developerInstructions?: string }).developerInstructions ?? "";
     expect(resumedInstructions).toContain(agentsGuidance);
     expect(resumedInstructions).not.toContain(updatedGuidance);
+  });
+
+  it("resumes frozen oversized external-cwd instructions after AGENTS.md disappears", async () => {
+    const { sessionFile, workspaceDir: executionDir } = createRunPaths();
+    const agentWorkspaceDir = path.join(tempDir, "oversized-agent-workspace");
+    const agentsGuidance =
+      `# Frozen oversized agent workspace guidance\n${"policy-🦀\n".repeat(7_000)}`.trimEnd();
+    expect(Buffer.byteLength(agentsGuidance)).toBeGreaterThan(65_536);
+    await fs.mkdir(executionDir, { recursive: true });
+    await fs.mkdir(agentWorkspaceDir, { recursive: true });
+    await fs.writeFile(path.join(agentWorkspaceDir, "AGENTS.md"), agentsGuidance);
+    const config = {
+      agents: {
+        defaults: {
+          bootstrapMaxChars: 200_000,
+          bootstrapTotalMaxChars: 200_000,
+        },
+      },
+    } as EmbeddedRunAttemptParams["config"];
+
+    const harness = createStartedThreadHarness();
+    const params = createParams(sessionFile, executionDir);
+    params.config = config;
+    params.bootstrapWorkspaceDir = agentWorkspaceDir;
+    setAgentWorkspaceForTest(params, agentWorkspaceDir);
+    const run = runCodexAppServerAttempt(params);
+    await harness.waitForMethod("turn/start");
+    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    await run;
+    const threadStart = harness.requests.find((request) => request.method === "thread/start");
+    if (!threadStart) {
+      throw new Error("expected thread/start request");
+    }
+    const frozenInstructions =
+      (threadStart.params as { developerInstructions?: string }).developerInstructions ?? "";
+    expect(frozenInstructions.includes(agentsGuidance)).toBe(true);
+
+    await fs.rm(path.join(agentWorkspaceDir, "AGENTS.md"));
+    const resumeHarness = createResumeHarness();
+    const resumeParams = createParams(sessionFile, executionDir);
+    resumeParams.config = config;
+    resumeParams.bootstrapWorkspaceDir = agentWorkspaceDir;
+    setAgentWorkspaceForTest(resumeParams, agentWorkspaceDir);
+    const resumedRun = runCodexAppServerAttempt(resumeParams);
+    await resumeHarness.waitForMethod("turn/start");
+    await resumeHarness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    await resumedRun;
+    const threadResume = resumeHarness.requests.find(
+      (request) => request.method === "thread/resume",
+    );
+    if (!threadResume) {
+      throw new Error("expected thread/resume request after AGENTS.md removal");
+    }
+    const resumedInstructions =
+      (threadResume.params as { developerInstructions?: string }).developerInstructions ?? "";
+    expect(Buffer.byteLength(resumedInstructions)).toBe(Buffer.byteLength(frozenInstructions));
+    expect(Buffer.from(resumedInstructions).equals(Buffer.from(frozenInstructions))).toBe(true);
+    expect(resumedInstructions.includes(agentsGuidance)).toBe(true);
   });
 
   it("injects bounded MEMORY.md when memory tools are unavailable", async () => {

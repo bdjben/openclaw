@@ -842,6 +842,22 @@ function createMemoryBlobStore<TMetadata>(): PluginBlobStore<TMetadata> {
       await register(key, bytes, metadata, opts);
       return true;
     },
+    async mutate(key, update) {
+      const next = update(read(key));
+      if (!next) {
+        return false;
+      }
+      if (next.kind === "delete") {
+        return entries.delete(key);
+      }
+      await register(
+        key,
+        next.bytes,
+        next.metadata,
+        next.ttlMs === undefined ? undefined : { ttlMs: next.ttlMs },
+      );
+      return true;
+    },
     async lookup(key) {
       return read(key);
     },

@@ -7,6 +7,7 @@ import {
   resetPluginBlobStoreForTests,
   type OpenBlobStoreOptions,
 } from "./plugin-blob-store.js";
+import { MAX_PLUGIN_BLOB_ENTRIES_PER_PLUGIN } from "./plugin-blob-store.sqlite.js";
 import { PluginBlobStoreError } from "./plugin-blob-store.types.js";
 
 afterEach(() => {
@@ -56,6 +57,130 @@ describe("plugin blob store", () => {
       expect(entries).toHaveLength(1);
       expect(entries[0]).toMatchObject({ key: "viewer", metadata: { kind: "viewer" } });
       expect("bytes" in entries[0]!).toBe(false);
+    });
+  });
+
+  it("atomically mutates one blob and rolls back callback failures", async () => {
+    await withOpenClawTestState({ label: "plugin-blob-mutate" }, async (state) => {
+      const store = createPluginBlobStore<{ owners: number }>("diffs", options(state.env));
+      await Promise.all(
+        Array.from({ length: 20 }, () =>
+          store.mutate("shared", (current) => ({
+            kind: "set",
+            bytes: current?.bytes ?? new Uint8Array([1, 2, 3]),
+            metadata: { owners: (current?.metadata.owners ?? 0) + 1 },
+          })),
+        ),
+      );
+      await expect(store.lookup("shared")).resolves.toMatchObject({
+        metadata: { owners: 20 },
+        bytes: new Uint8Array([1, 2, 3]),
+      });
+
+      await expect(
+        store.mutate("shared", () => {
+          throw new Error("stop mutation");
+        }),
+      ).rejects.toMatchObject({
+        code: "PLUGIN_BLOB_WRITE_FAILED",
+        operation: "mutate",
+        cause: expect.objectContaining({ message: "stop mutation" }),
+      });
+      await expect(store.lookup("shared")).resolves.toMatchObject({ metadata: { owners: 20 } });
+      await expect(
+        store.mutate("shared", () => ({
+          kind: "set",
+          bytes: new Uint8Array(17),
+          metadata: { owners: 21 },
+        })),
+      ).rejects.toMatchObject({
+        code: "PLUGIN_BLOB_LIMIT_EXCEEDED",
+        operation: "mutate",
+      });
+      await expect(store.lookup("shared")).resolves.toMatchObject({ metadata: { owners: 20 } });
+      await expect(store.mutate("shared", () => ({ kind: "delete" }))).resolves.toBe(true);
+      await expect(store.lookup("shared")).resolves.toBeUndefined();
+    });
+  });
+
+  it("labels namespace and plugin quota failures as mutate operations", async () => {
+    await withOpenClawTestState({ label: "plugin-blob-mutate-quota" }, async (state) => {
+      const rowStore = createPluginBlobStore<{ order: number }>(
+        "diffs",
+        options(state.env, {
+          namespace: "mutate-row-limit",
+          maxEntries: 1,
+          maxBytesPerEntry: 4,
+          maxBytesPerNamespace: 4,
+          overflowPolicy: "reject-new",
+        }),
+      );
+      await rowStore.register("one", new Uint8Array([1]), { order: 1 });
+      await expect(
+        rowStore.mutate("two", () => ({
+          kind: "set",
+          bytes: new Uint8Array([2]),
+          metadata: { order: 2 },
+        })),
+      ).rejects.toMatchObject({
+        code: "PLUGIN_BLOB_LIMIT_EXCEEDED",
+        operation: "mutate",
+        message: expect.stringContaining("stored row limit"),
+      });
+
+      const byteStore = createPluginBlobStore<{ order: number }>(
+        "diffs",
+        options(state.env, {
+          namespace: "mutate-byte-limit",
+          maxEntries: 2,
+          maxBytesPerEntry: 4,
+          maxBytesPerNamespace: 4,
+          overflowPolicy: "reject-new",
+        }),
+      );
+      await byteStore.register("one", new Uint8Array([1, 1]), { order: 1 });
+      await expect(
+        byteStore.mutate("two", () => ({
+          kind: "set",
+          bytes: new Uint8Array([2, 2, 2]),
+          metadata: { order: 2 },
+        })),
+      ).rejects.toMatchObject({
+        code: "PLUGIN_BLOB_LIMIT_EXCEEDED",
+        operation: "mutate",
+        message: expect.stringContaining("stored byte limit"),
+      });
+
+      const pluginCapStore = createPluginBlobStore<{ order: number }>(
+        "plugin-cap",
+        options(state.env, {
+          namespace: "mutate-plugin-limit",
+          overflowPolicy: "reject-new",
+        }),
+      );
+      const { db } = openOpenClawStateDatabase({ env: state.env });
+      db.exec(`
+        WITH RECURSIVE counter(value) AS (
+          VALUES (1)
+          UNION ALL
+          SELECT value + 1 FROM counter WHERE value < ${MAX_PLUGIN_BLOB_ENTRIES_PER_PLUGIN}
+        )
+        INSERT INTO plugin_blob_entries
+          (plugin_id, namespace, entry_key, metadata_json, blob, created_at, expires_at)
+        SELECT 'plugin-cap', 'fixture', printf('row-%05d', value), '{}', zeroblob(0), 1, NULL
+        FROM counter
+      `);
+      await expect(
+        pluginCapStore.mutate("overflow", () => ({
+          kind: "set",
+          bytes: new Uint8Array(),
+          metadata: { order: 1 },
+        })),
+      ).rejects.toMatchObject({
+        code: "PLUGIN_BLOB_LIMIT_EXCEEDED",
+        operation: "mutate",
+        message: expect.stringContaining("per-plugin row limit"),
+      });
     });
   });
 
@@ -287,6 +412,33 @@ describe("plugin blob store", () => {
     });
   });
 
+  it("lets explicit mutate replace an expired key while exposing no live current entry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(4_750);
+    await withOpenClawTestState({ label: "plugin-blob-expired-mutate" }, async (state) => {
+      const store = createPluginBlobStore<{ version: string }>("diffs", options(state.env));
+      await store.register("stable", new Uint8Array([1]), { version: "old" }, { ttlMs: 10 });
+
+      vi.setSystemTime(4_761);
+      await expect(
+        store.mutate("stable", (current) => {
+          expect(current).toBeUndefined();
+          return {
+            kind: "set",
+            bytes: new Uint8Array([2]),
+            metadata: { version: "new" },
+          };
+        }),
+      ).resolves.toBe(true);
+
+      await expect(store.lookup("stable")).resolves.toMatchObject({
+        metadata: { version: "new" },
+        bytes: new Uint8Array([2]),
+      });
+      await expect(store.deleteExpiredKey("stable")).resolves.toBeUndefined();
+    });
+  });
+
   it("evicts by namespace bytes without touching sibling namespaces", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(3_000);
@@ -342,6 +494,15 @@ describe("plugin blob store", () => {
       ).run("diffs", "artifacts", "corrupt", "{", Buffer.from([7]), 1, null);
       await expect(store.lookup("corrupt")).rejects.toMatchObject({
         code: "PLUGIN_BLOB_CORRUPT",
+        operation: "lookup",
+      });
+      await expect(
+        store.mutate("corrupt", () => ({
+          kind: "delete",
+        })),
+      ).rejects.toMatchObject({
+        code: "PLUGIN_BLOB_CORRUPT",
+        operation: "mutate",
       });
     });
   });

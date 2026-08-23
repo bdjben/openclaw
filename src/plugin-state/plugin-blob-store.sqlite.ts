@@ -43,6 +43,7 @@ type BlobDescriptor = {
 };
 
 type BlobWriteParams = {
+  operation: "register" | "mutate";
   pluginId: string;
   namespace: string;
   key: string;
@@ -56,6 +57,11 @@ type BlobWriteParams = {
 };
 
 type ValidateMetadataJson = (metadataJson: string) => void;
+
+type PluginBlobStoredMutation =
+  | { kind: "set"; bytes: Uint8Array; metadataJson: string; ttlMs?: number }
+  | { kind: "delete" }
+  | undefined;
 
 function createError(params: {
   code: PluginBlobStoreErrorCode;
@@ -280,10 +286,14 @@ function totalBytes(rows: readonly { size_bytes: number | bigint }[]): number {
   return rows.reduce((total, row) => total + Number(row.size_bytes), 0);
 }
 
-function limitError(message: string, env?: NodeJS.ProcessEnv): PluginBlobStoreError {
+function limitError(
+  message: string,
+  operation: "register" | "mutate",
+  env?: NodeJS.ProcessEnv,
+): PluginBlobStoreError {
   return createError({
     code: "PLUGIN_BLOB_LIMIT_EXCEEDED",
-    operation: "register",
+    operation,
     message,
     env,
   });
@@ -306,22 +316,38 @@ function assertProjectedLimits(params: {
   const previousBytes = params.existing ? Number(params.existing.size_bytes) : 0;
   const rowDelta = params.existing ? 0 : 1;
   if (namespaceRows.length + rowDelta > params.write.maxEntries) {
-    throw limitError("Plugin blob namespace reached its stored row limit.", params.write.env);
+    throw limitError(
+      "Plugin blob namespace reached its stored row limit.",
+      params.write.operation,
+      params.write.env,
+    );
   }
   if (
     totalBytes(namespaceRows) - previousBytes + params.write.bytes.byteLength >
     params.write.maxBytesPerNamespace
   ) {
-    throw limitError("Plugin blob namespace reached its stored byte limit.", params.write.env);
+    throw limitError(
+      "Plugin blob namespace reached its stored byte limit.",
+      params.write.operation,
+      params.write.env,
+    );
   }
   if (pluginRows.length + rowDelta > MAX_PLUGIN_BLOB_ENTRIES_PER_PLUGIN) {
-    throw limitError("Plugin blob store reached its per-plugin row limit.", params.write.env);
+    throw limitError(
+      "Plugin blob store reached its per-plugin row limit.",
+      params.write.operation,
+      params.write.env,
+    );
   }
   if (
     totalBytes(pluginRows) - previousBytes + params.write.bytes.byteLength >
     MAX_PLUGIN_BLOB_BYTES_PER_PLUGIN
   ) {
-    throw limitError("Plugin blob store reached its per-plugin byte limit.", params.write.env);
+    throw limitError(
+      "Plugin blob store reached its per-plugin byte limit.",
+      params.write.operation,
+      params.write.env,
+    );
   }
 }
 
@@ -362,6 +388,7 @@ function deleteOldestUntilWithinLimits(params: {
   ) {
     throw limitError(
       "Plugin blob namespace cannot satisfy its configured limits.",
+      params.write.operation,
       params.write.env,
     );
   }
@@ -400,7 +427,11 @@ function deleteOldestUntilWithinLimits(params: {
     pluginCount > MAX_PLUGIN_BLOB_ENTRIES_PER_PLUGIN ||
     pluginBytes > MAX_PLUGIN_BLOB_BYTES_PER_PLUGIN
   ) {
-    throw limitError("Plugin blob store cannot satisfy its per-plugin limits.", params.write.env);
+    throw limitError(
+      "Plugin blob store cannot satisfy its per-plugin limits.",
+      params.write.operation,
+      params.write.env,
+    );
   }
   deleteKeys(params.db, {
     pluginId: params.write.pluginId,
@@ -418,7 +449,7 @@ function upsertBlob(db: DatabaseSync, params: BlobWriteParams, now: number): voi
     if (resolved === undefined) {
       throw createError({
         code: "PLUGIN_BLOB_INVALID_INPUT",
-        operation: "register",
+        operation: params.operation,
         message: "Plugin blob ttlMs cannot produce a valid expiry timestamp.",
         env: params.env,
       });
@@ -452,7 +483,7 @@ function upsertBlob(db: DatabaseSync, params: BlobWriteParams, now: number): voi
 
 function writeBlob(params: BlobWriteParams, ifAbsent: boolean): boolean {
   try {
-    openDatabase("register", params.env);
+    openDatabase(params.operation, params.env);
     return runOpenClawStateWriteTransaction(
       ({ db }) => {
         const now = Date.now();
@@ -476,7 +507,7 @@ function writeBlob(params: BlobWriteParams, ifAbsent: boolean): boolean {
   } catch (error) {
     throw wrapError(
       error,
-      "register",
+      params.operation,
       "PLUGIN_BLOB_WRITE_FAILED",
       "Failed to register plugin blob entry.",
       params.env,
@@ -490,6 +521,54 @@ export function pluginBlobRegister(params: BlobWriteParams): void {
 
 export function pluginBlobRegisterIfAbsent(params: BlobWriteParams): boolean {
   return writeBlob(params, true);
+}
+
+export function pluginBlobMutate(
+  params: Omit<BlobWriteParams, "bytes" | "metadataJson" | "ttlMs" | "operation"> & {
+    operation: "mutate";
+    mutate: (current: PluginBlobStoredEntry | undefined) => PluginBlobStoredMutation;
+  },
+): boolean {
+  try {
+    openDatabase(params.operation, params.env);
+    return runOpenClawStateWriteTransaction(
+      ({ db }) => {
+        const now = Date.now();
+        const current = selectLiveBlob(db, { ...params, now });
+        const next = params.mutate(current);
+        if (!next) {
+          return false;
+        }
+        if (next.kind === "delete") {
+          return deleteKey(db, params) > 0;
+        }
+        const write: BlobWriteParams = {
+          ...params,
+          bytes: next.bytes,
+          metadataJson: next.metadataJson,
+          ...(next.ttlMs !== undefined ? { ttlMs: next.ttlMs } : {}),
+        };
+        const existing = selectStoredKeyDescriptor(db, params);
+        if (params.overflowPolicy === "reject-new") {
+          assertProjectedLimits({ db, write, existing });
+        }
+        upsertBlob(db, write, now);
+        if (params.overflowPolicy === "evict-oldest") {
+          deleteOldestUntilWithinLimits({ db, write, now });
+        }
+        return true;
+      },
+      params.env ? { env: params.env } : {},
+    );
+  } catch (error) {
+    throw wrapError(
+      error,
+      params.operation,
+      "PLUGIN_BLOB_WRITE_FAILED",
+      "Failed to mutate plugin blob entry.",
+      params.env,
+    );
+  }
 }
 
 export function pluginBlobLookup(params: {

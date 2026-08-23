@@ -106,6 +106,11 @@ artifact. Plan-based migrations can use
 `openclaw/plugin-sdk/runtime-doctor-migrations` to preserve existing move, copy, preview,
 and plugin-state import behavior.
 
+State-migration callbacks can use `context.openPluginBlobStore(...)` when a
+repair must move bounded plugin-state values into the plugin's existing blob
+namespace. Migration execution holds exclusive state ownership across blob and
+keyed-store repair; reconcile any cross-store ownership metadata before returning.
+
 The setup-entry `legacyStateMigrations` option and feature flag,
 `setupFeatures.legacyStateMigrations`,
 `BundledChannelLegacyStateMigrationDetector`, and

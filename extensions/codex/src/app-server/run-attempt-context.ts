@@ -156,11 +156,11 @@ export async function prepareCodexAttemptContext(
     sandboxed: sandbox?.enabled === true,
   });
   // A thread keeps the bounded agent-workspace snapshot captured at creation.
-  // Workspace edits take effect only in the next session.
-  const agentWorkspaceDeveloperInstructions = workspaceBootstrapContext.threadDeveloperInstructions
-    ? (connection.mutable.startupBinding?.agentWorkspaceDeveloperInstructions ??
-      workspaceBootstrapContext.threadDeveloperInstructions)
-    : undefined;
+  // A resumed binding owns that snapshot even when the live file disappeared;
+  // only a new native thread may inherit the workspace's current instructions.
+  const agentWorkspaceDeveloperInstructions = connection.mutable.startupBinding
+    ? connection.mutable.startupBinding.agentWorkspaceDeveloperInstructions
+    : workspaceBootstrapContext.threadDeveloperInstructions;
   const baseDeveloperInstructions = joinPresentSections(
     buildDeveloperInstructions(runtimeParams, {
       dynamicTools: toolBridge.availableSpecs,

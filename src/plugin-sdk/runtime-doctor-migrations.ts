@@ -48,6 +48,10 @@ export type {
   RetiredChannelKeyRemoval,
 } from "../config/channel-compat-normalization.js";
 export type {
+  OpenBlobStoreOptions,
+  PluginBlobStore,
+} from "../plugin-state/plugin-blob-store.types.js";
+export type {
   OpenKeyedStoreOptions,
   PluginStateKeyedStore,
 } from "../plugin-state/plugin-state-store.js";

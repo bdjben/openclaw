@@ -3397,7 +3397,8 @@ describe("Codex app-server supervised branch lifecycle", () => {
     const probeThreadId = "thread-probe";
     const finalThreadId = "thread-final";
     const lastTurnId = "turn-terminal";
-    const agentWorkspaceDeveloperInstructions = "Follow the frozen supervised AGENTS guidance.";
+    const agentWorkspaceDeveloperInstructions = `# Frozen supervised AGENTS guidance\n${"policy-🦀\n".repeat(7_000)}`;
+    expect(Buffer.byteLength(agentWorkspaceDeveloperInstructions)).toBeGreaterThan(65_536);
     const workspaceDir = path.join(tempDir, "workspace");
     const attempt = createThreadLifecycleParams(path.join(tempDir, "session.jsonl"), workspaceDir);
     attempt.modelId = "outer-global-default";

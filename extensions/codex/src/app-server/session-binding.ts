@@ -18,6 +18,12 @@ import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-s
 import { asOptionalRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { z } from "zod";
 import { CODEX_PLUGIN_MARKETPLACE_NAME_PATTERN, normalizeCodexServiceTier } from "./config.js";
+import {
+  releaseCodexInstructionBlob,
+  resolveCodexInstructionBlob,
+  retainCodexInstructionBlob,
+  type CodexInstructionBlobStore,
+} from "./instruction-blob.js";
 import type { CodexManagedThreadStore } from "./managed-thread-store.js";
 import type { PluginAppPolicyContext } from "./plugin-thread-config.js";
 import type { CodexServiceTier } from "./protocol.js";
@@ -26,10 +32,14 @@ const CODEX_APP_SERVER_NATIVE_AUTH_PROVIDER = "openai";
 const PUBLIC_OPENAI_MODEL_PROVIDER = "openai";
 const BINDING_LEASE_RETRY_INTERVAL_MS = 1_000;
 const BOUNDED_BINDING_FINGERPRINT_PATTERN = /^sha256:[a-f0-9]{64}$/i;
+const INSTRUCTION_BLOB_REFERENCE_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 export {
   CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
   CODEX_APP_SERVER_BINDING_NAMESPACE,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
 } from "./session-binding-meta.js";
 export const CODEX_APP_SERVER_BINDING_GUARDED_REQUEST_TIMEOUT_MS = 60_000;
 const BINDING_LEASE_STALE_MS = CODEX_APP_SERVER_BINDING_GUARDED_REQUEST_TIMEOUT_MS + 5_000;
@@ -199,151 +209,179 @@ const pluginAppPolicyContextSchema = z
     pluginAppIds: z.record(z.string(), z.array(z.string())).default({}),
   })
   .strict();
-const threadBindingSchema = z
-  .object({
-    threadId: z.string().refine((value) => Boolean(value.trim())),
-    clientId: optionalStringSchema,
-    cwd: z.string(),
-    rolloutPath: optionalNonBlankStringSchema,
-    // Private runtime ownership. Only the supervision catalog creates this
-    // marker; public OpenClaw session metadata must never authorize user-home access.
-    connectionScope: z.literal("supervision").optional(),
-    supervisionSourceThreadId: z.string().trim().min(1).optional(),
-    authProfileId: optionalStringSchema,
-    // Freeze OpenClaw-carried AGENTS.md at thread creation; bootstrap refreshes
-    // must not mutate the inherited policy of a resumed native session.
-    agentWorkspaceDeveloperInstructions: optionalNonBlankStringSchema,
-    model: optionalStringSchema,
-    // Codex App Server owns selection for supervised and adopted threads. Keep
-    // this marker across resumes so OpenClaw never substitutes a default or fallback.
-    preserveNativeModel: z.literal(true).optional().catch(undefined),
-    // Continue creates the OpenClaw Chat before native execution. This closed
-    // snapshot state is materialized only inside the fully configured harness.
-    pendingSupervisionBranch: pendingSupervisionBranchSchema.optional(),
-    modelProvider: z
-      .string()
-      .transform((value) => value.trim())
-      .pipe(z.string().min(1))
-      .optional()
-      .catch(undefined),
-    // Legacy rows may contain the retired two-field permission overlay. Keep
-    // parsing it so the rest of the binding survives; SessionEntry owns live policy.
-    approvalPolicy: z
-      .preprocess(
-        (value) => (value === "on-failure" ? "on-request" : value),
-        z.enum(["never", "on-request", "untrusted"]).optional(),
-      )
-      .catch(undefined),
-    sandbox: z
-      .enum(["read-only", "workspace-write", "danger-full-access"])
-      .optional()
-      .catch(undefined),
-    serviceTier: z
-      .preprocess(
-        normalizeCodexServiceTier,
-        z.custom<CodexServiceTier>((value) => typeof value === "string").optional(),
-      )
-      .optional()
-      .catch(undefined),
-    networkProxyProfileName: optionalStringSchema,
-    networkProxyConfigFingerprint: optionalStringSchema,
-    dynamicToolsFingerprint: optionalStringSchema,
-    dynamicToolsContainDeferred: optionalBooleanSchema,
-    webSearchThreadConfigFingerprint: optionalStringSchema,
-    nativeSkillIsolationFingerprint: optionalStringSchema,
-    userMcpServersFingerprint: optionalStringSchema,
-    mcpServersFingerprint: optionalStringSchema,
-    configuredMcpOwnershipVersion: z.literal(1).optional().catch(undefined),
-    ringZeroConfigFingerprint: optionalStringSchema,
-    ringZeroClientInstanceId: optionalStringSchema,
-    /** Durable fact preventing a later unrestricted turn from widening this thread. */
-    nativeToolPolicyRestricted: z.literal(true).optional().catch(undefined),
-    nativeHookRelayGeneration: optionalNonBlankStringSchema,
-    appServerRuntimeFingerprint: optionalStringSchema,
-    pluginAppsFingerprint: optionalStringSchema,
-    pluginAppsInputFingerprint: optionalStringSchema,
-    pluginAppPolicyContext: pluginAppPolicyContextSchema.optional().catch(undefined),
-    contextEngine: contextEngineSchema.optional().catch(undefined),
-    environmentSelectionFingerprint: optionalStringSchema,
-    conversationStartId: optionalStringSchema,
-    conversationSourceTransferComplete: z.literal(true).optional().catch(undefined),
-    historyCoveredThrough: optionalTimestampSchema,
-    // Observed density of the last completed turn on this thread: prompt chars
-    // actually sent vs provider-reported input tokens. Read by the no-engine
-    // continuity cap so the next projection is sized from this session's real
-    // content density instead of a fixed chars-per-token guess.
-    continuityCalibration: z
-      .object({
-        promptChars: z.number().int().positive(),
-        inputTokens: z.number().int().positive(),
-      })
-      .optional()
-      .catch(undefined),
-  })
-  .superRefine((binding, context) => {
-    if (binding.connectionScope === "supervision") {
-      if (!binding.supervisionSourceThreadId) {
-        context.addIssue({
-          code: "custom",
-          message: "supervision connection ownership requires its native source thread id",
-        });
-      }
-      if (binding.preserveNativeModel !== true) {
-        context.addIssue({
-          code: "custom",
-          message: "supervision connection ownership requires native model ownership",
-        });
-      }
-      if (binding.conversationSourceTransferComplete !== true) {
-        context.addIssue({
-          code: "custom",
-          message: "supervision connection ownership requires a completed source transfer",
-        });
-      }
-      if (!binding.pendingSupervisionBranch && (!binding.model?.trim() || !binding.modelProvider)) {
-        context.addIssue({
-          code: "custom",
-          message: "materialized supervision bindings require a native model and provider",
-        });
-      }
-    }
-    if (binding.supervisionSourceThreadId && binding.connectionScope !== "supervision") {
+const threadBindingShape = {
+  threadId: z.string().refine((value) => Boolean(value.trim())),
+  clientId: optionalStringSchema,
+  cwd: z.string(),
+  rolloutPath: optionalNonBlankStringSchema,
+  // Private runtime ownership. Only the supervision catalog creates this
+  // marker; public OpenClaw session metadata must never authorize user-home access.
+  connectionScope: z.literal("supervision").optional(),
+  supervisionSourceThreadId: z.string().trim().min(1).optional(),
+  authProfileId: optionalStringSchema,
+  model: optionalStringSchema,
+  // Codex App Server owns selection for supervised and adopted threads. Keep
+  // this marker across resumes so OpenClaw never substitutes a default or fallback.
+  preserveNativeModel: z.literal(true).optional().catch(undefined),
+  // Continue creates the OpenClaw Chat before native execution. This closed
+  // snapshot state is materialized only inside the fully configured harness.
+  pendingSupervisionBranch: pendingSupervisionBranchSchema.optional(),
+  modelProvider: z
+    .string()
+    .transform((value) => value.trim())
+    .pipe(z.string().min(1))
+    .optional()
+    .catch(undefined),
+  // Legacy rows may contain the retired two-field permission overlay. Keep
+  // parsing it so the rest of the binding survives; SessionEntry owns live policy.
+  approvalPolicy: z
+    .preprocess(
+      (value) => (value === "on-failure" ? "on-request" : value),
+      z.enum(["never", "on-request", "untrusted"]).optional(),
+    )
+    .catch(undefined),
+  sandbox: z
+    .enum(["read-only", "workspace-write", "danger-full-access"])
+    .optional()
+    .catch(undefined),
+  serviceTier: z
+    .preprocess(
+      normalizeCodexServiceTier,
+      z.custom<CodexServiceTier>((value) => typeof value === "string").optional(),
+    )
+    .optional()
+    .catch(undefined),
+  networkProxyProfileName: optionalStringSchema,
+  networkProxyConfigFingerprint: optionalStringSchema,
+  dynamicToolsFingerprint: optionalStringSchema,
+  dynamicToolsContainDeferred: optionalBooleanSchema,
+  webSearchThreadConfigFingerprint: optionalStringSchema,
+  nativeSkillIsolationFingerprint: optionalStringSchema,
+  userMcpServersFingerprint: optionalStringSchema,
+  mcpServersFingerprint: optionalStringSchema,
+  configuredMcpOwnershipVersion: z.literal(1).optional().catch(undefined),
+  ringZeroConfigFingerprint: optionalStringSchema,
+  ringZeroClientInstanceId: optionalStringSchema,
+  /** Durable fact preventing a later unrestricted turn from widening this thread. */
+  nativeToolPolicyRestricted: z.literal(true).optional().catch(undefined),
+  nativeHookRelayGeneration: optionalNonBlankStringSchema,
+  appServerRuntimeFingerprint: optionalStringSchema,
+  pluginAppsFingerprint: optionalStringSchema,
+  pluginAppsInputFingerprint: optionalStringSchema,
+  pluginAppPolicyContext: pluginAppPolicyContextSchema.optional().catch(undefined),
+  contextEngine: contextEngineSchema.optional().catch(undefined),
+  environmentSelectionFingerprint: optionalStringSchema,
+  conversationStartId: optionalStringSchema,
+  conversationSourceTransferComplete: z.literal(true).optional().catch(undefined),
+  historyCoveredThrough: optionalTimestampSchema,
+  // Observed density of the last completed turn on this thread: prompt chars
+  // actually sent vs provider-reported input tokens. Read by the no-engine
+  // continuity cap so the next projection is sized from this session's real
+  // content density instead of a fixed chars-per-token guess.
+  continuityCalibration: z
+    .object({
+      promptChars: z.number().int().positive(),
+      inputTokens: z.number().int().positive(),
+    })
+    .optional()
+    .catch(undefined),
+} satisfies z.ZodRawShape;
+
+type ThreadBindingValidationValue = z.infer<z.ZodObject<typeof threadBindingShape>>;
+
+function validateThreadBinding(binding: ThreadBindingValidationValue, context: z.RefinementCtx) {
+  if (binding.connectionScope === "supervision") {
+    if (!binding.supervisionSourceThreadId) {
       context.addIssue({
         code: "custom",
-        message: "a supervision source thread id requires supervision connection ownership",
-      });
-    }
-    if (!binding.pendingSupervisionBranch) {
-      return;
-    }
-    if (binding.threadId !== binding.pendingSupervisionBranch.sourceThreadId) {
-      context.addIssue({
-        code: "custom",
-        message: "pending supervision source must match the provisional thread binding",
-      });
-    }
-    if (binding.supervisionSourceThreadId !== binding.pendingSupervisionBranch.sourceThreadId) {
-      context.addIssue({
-        code: "custom",
-        message: "pending supervision source must match its durable source identity",
+        message: "supervision connection ownership requires its native source thread id",
       });
     }
     if (binding.preserveNativeModel !== true) {
       context.addIssue({
         code: "custom",
-        message: "pending supervision bindings must defer model selection to Codex App Server",
+        message: "supervision connection ownership requires native model ownership",
       });
     }
-    if (binding.connectionScope !== "supervision") {
+    if (binding.conversationSourceTransferComplete !== true) {
       context.addIssue({
         code: "custom",
-        message: "pending supervision bindings require supervision connection ownership",
+        message: "supervision connection ownership requires a completed source transfer",
       });
     }
-  });
+    if (!binding.pendingSupervisionBranch && (!binding.model?.trim() || !binding.modelProvider)) {
+      context.addIssue({
+        code: "custom",
+        message: "materialized supervision bindings require a native model and provider",
+      });
+    }
+  }
+  if (binding.supervisionSourceThreadId && binding.connectionScope !== "supervision") {
+    context.addIssue({
+      code: "custom",
+      message: "a supervision source thread id requires supervision connection ownership",
+    });
+  }
+  if (!binding.pendingSupervisionBranch) {
+    return;
+  }
+  if (binding.threadId !== binding.pendingSupervisionBranch.sourceThreadId) {
+    context.addIssue({
+      code: "custom",
+      message: "pending supervision source must match the provisional thread binding",
+    });
+  }
+  if (binding.supervisionSourceThreadId !== binding.pendingSupervisionBranch.sourceThreadId) {
+    context.addIssue({
+      code: "custom",
+      message: "pending supervision source must match its durable source identity",
+    });
+  }
+  if (binding.preserveNativeModel !== true) {
+    context.addIssue({
+      code: "custom",
+      message: "pending supervision bindings must defer model selection to Codex App Server",
+    });
+  }
+  if (binding.connectionScope !== "supervision") {
+    context.addIssue({
+      code: "custom",
+      message: "pending supervision bindings require supervision connection ownership",
+    });
+  }
+}
+
+const domainThreadBindingSchema = z
+  .object({
+    ...threadBindingShape,
+    // Freeze OpenClaw-carried AGENTS.md at thread creation; bootstrap refreshes
+    // must not mutate the inherited policy of a resumed native session.
+    agentWorkspaceDeveloperInstructions: optionalNonBlankStringSchema,
+  })
+  .superRefine(validateThreadBinding);
+const storedThreadBindingSchema = z
+  .object({
+    ...threadBindingShape,
+    agentWorkspaceDeveloperInstructionsRef: z
+      .string()
+      .regex(INSTRUCTION_BLOB_REFERENCE_PATTERN)
+      .optional(),
+  })
+  // Runtime rows must never silently strip a legacy inline snapshot. Reject it
+  // here so the doctor-owned migration can externalize the bytes deliberately.
+  .strict()
+  .superRefine(validateThreadBinding);
+const legacyThreadBindingSchema = z
+  .object({
+    ...threadBindingShape,
+    agentWorkspaceDeveloperInstructions: optionalNonBlankStringSchema,
+  })
+  .strict()
+  .superRefine(validateThreadBinding);
 
 /** Durable Codex thread facts. Storage identity and schema stay outside this domain value. */
-export type CodexAppServerThreadBinding = z.infer<typeof threadBindingSchema>;
+type StoredCodexAppServerThreadBinding = z.infer<typeof storedThreadBindingSchema>;
+export type CodexAppServerThreadBinding = z.infer<typeof domainThreadBindingSchema>;
 /** Persisted source snapshot and orphan-cleanup state for a supervised native branch. */
 export type CodexAppServerPendingSupervisionBranch = z.infer<typeof pendingSupervisionBranchSchema>;
 
@@ -428,26 +466,41 @@ const storedSessionIdSchema = z
   .pipe(z.string().min(1))
   .optional()
   .catch(undefined);
+const clearedStoredBindingSchema = z.object({
+  version: z.literal(1),
+  state: z.literal("cleared"),
+  sessionId: storedSessionIdSchema,
+  lease: bindingLeaseSchema.optional().catch(undefined),
+  retired: z.literal(true).optional().catch(undefined),
+});
 const storedBindingSchema = z.discriminatedUnion("state", [
   z.object({
     version: z.literal(1),
     state: z.literal("active"),
-    binding: threadBindingSchema,
+    binding: storedThreadBindingSchema,
     sessionId: storedSessionIdSchema,
     lease: bindingLeaseSchema.optional().catch(undefined),
   }),
+  clearedStoredBindingSchema,
+]);
+const legacyStoredBindingSchema = z.discriminatedUnion("state", [
   z.object({
     version: z.literal(1),
-    state: z.literal("cleared"),
+    state: z.literal("active"),
+    binding: legacyThreadBindingSchema,
     sessionId: storedSessionIdSchema,
     lease: bindingLeaseSchema.optional().catch(undefined),
-    retired: z.literal(true).optional().catch(undefined),
   }),
+  clearedStoredBindingSchema,
 ]);
 
 // Session-key rows survive transcript/session-id rotation. The stored physical
 // id fences delayed lifecycle cleanup so an old generation cannot clear its successor.
 export type StoredCodexAppServerBinding = z.infer<typeof storedBindingSchema>;
+export type LegacyStoredCodexAppServerBinding = z.infer<typeof legacyStoredBindingSchema>;
+export type DoctorStoredCodexAppServerBinding =
+  | StoredCodexAppServerBinding
+  | LegacyStoredCodexAppServerBinding;
 
 export function hashCodexAppServerBindingFingerprint(canonical: string): string {
   return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
@@ -490,25 +543,25 @@ function normalizeLegacyBindingFingerprints<
 
 export function normalizeStoredCodexAppServerBindingFingerprints(
   value: unknown,
-): StoredCodexAppServerBinding | undefined {
-  const stored = readStoredCodexAppServerBinding(value);
+): DoctorStoredCodexAppServerBinding | undefined {
+  const stored = readDoctorStoredCodexAppServerBinding(value);
   if (!stored || stored.state !== "active") {
     return stored;
   }
   const binding = normalizeLegacyBindingFingerprints(stored.binding);
   return binding === stored.binding
     ? stored
-    : readStoredCodexAppServerBinding({ ...stored, binding });
+    : readDoctorStoredCodexAppServerBinding({ ...stored, binding });
 }
 
-/** Encodes a migrated sidecar binding as one canonical plugin-state row. */
+/** Parses a shipped sidecar for doctor-owned canonicalization and import. */
 export function createStoredCodexAppServerBinding(
   value: unknown,
   options: {
     now?: string;
     lookup?: Omit<CodexAppServerAuthProfileLookup, "authProfileId">;
   } = {},
-): Extract<StoredCodexAppServerBinding, { state: "active" }> | undefined {
+): Extract<LegacyStoredCodexAppServerBinding, { state: "active" }> | undefined {
   const rawRecord = asOptionalRecord(value);
   if (!rawRecord) {
     return undefined;
@@ -673,9 +726,36 @@ export async function reclaimCurrentCodexSessionGeneration(params: {
   });
 }
 
+async function hydrateInstructionBlob(
+  store: CodexInstructionBlobStore,
+  binding: StoredCodexAppServerThreadBinding,
+): Promise<CodexAppServerThreadBinding> {
+  const { agentWorkspaceDeveloperInstructionsRef: reference, ...domain } = binding;
+  if (!reference) {
+    return domain;
+  }
+  const instructions = await resolveCodexInstructionBlob(store, reference);
+  return { ...domain, agentWorkspaceDeveloperInstructions: instructions };
+}
+
+function externalizeInstructionBinding(
+  binding: CodexAppServerThreadBinding & { agentWorkspaceDeveloperInstructionsRef?: string },
+  retainedReference?: string,
+): StoredCodexAppServerThreadBinding {
+  const { agentWorkspaceDeveloperInstructions: _instructions, ...stored } = binding;
+  return storedThreadBindingSchema.parse(
+    stripUndefinedValue(
+      retainedReference
+        ? { ...stored, agentWorkspaceDeveloperInstructionsRef: retainedReference }
+        : stored,
+    ),
+  );
+}
+
 /** Creates the single binding facade owned by the Codex plugin runtime. */
 export function createCodexAppServerBindingStore(
   state: BindingStateStore,
+  instructionBlobs?: CodexInstructionBlobStore,
 ): CodexAppServerBindingStore {
   const update = state.update?.bind(state);
   if (!update) {
@@ -825,9 +905,15 @@ export function createCodexAppServerBindingStore(
       if (raw !== undefined && !stored) {
         throw new Error(`Invalid Codex app-server binding row: ${key}`);
       }
-      return stored?.state === "active" && ownsStoredSessionGeneration(identity, stored)
-        ? stored.binding
-        : undefined;
+      if (stored?.state !== "active" || !ownsStoredSessionGeneration(identity, stored)) {
+        return undefined;
+      }
+      if (!instructionBlobs && stored.binding.agentWorkspaceDeveloperInstructionsRef) {
+        throw new Error("Codex app-server instruction blob store is unavailable");
+      }
+      return instructionBlobs
+        ? await hydrateInstructionBlob(instructionBlobs, stored.binding)
+        : readCodexAppServerThreadBinding(stored.binding);
     },
 
     async hasOtherThreadOwner(threadId, currentIdentity) {
@@ -877,163 +963,235 @@ export function createCodexAppServerBindingStore(
     async mutate(identity, mutation) {
       return await runBindingMutation(async () => {
         const key = bindingStoreKey(identity);
+        const patchWithInstructions =
+          mutation.kind === "patch" || mutation.kind === "commit-pending-supervision-branch"
+            ? mutation.patch
+            : undefined;
+        const inputBinding =
+          mutation.kind === "set" || mutation.kind === "replace-thread"
+            ? mutation.binding
+            : undefined;
+        const hasInstructionUpdate = inputBinding
+          ? Object.hasOwn(inputBinding, "agentWorkspaceDeveloperInstructions")
+          : patchWithInstructions
+            ? Object.hasOwn(patchWithInstructions, "agentWorkspaceDeveloperInstructions")
+            : false;
+        const instructions =
+          inputBinding?.agentWorkspaceDeveloperInstructions ??
+          patchWithInstructions?.agentWorkspaceDeveloperInstructions;
+        if (instructions && !instructionBlobs) {
+          throw new Error("Codex app-server instruction blob store is unavailable");
+        }
+        const retainedReference =
+          instructions && instructionBlobs
+            ? await retainCodexInstructionBlob({ store: instructionBlobs, instructions })
+            : undefined;
+        let previousReference: string | undefined;
+        let nextReference: string | undefined;
         // A retained legacy sidecar may be revisited by doctor after runtime
         // clear. Keep provenance so migration cannot resurrect its stale thread.
         const retainLegacyClear =
           mutation.kind === "clear" && key.startsWith("conversation:legacy-");
-        return await transactKey(
-          key,
-          (current, leaseToken) => {
-            const ownsGeneration = ownsStoredSessionGeneration(identity, current);
-            const ownedLease =
-              current?.lease && current.lease.token === leaseToken ? { lease: current.lease } : {};
-            if (mutation.kind === "reclaim-generation") {
-              if (identity.kind !== "session" || !identity.sessionKey?.trim()) {
-                return { result: false };
-              }
-              if (!current) {
-                return { result: true };
-              }
-              if (ownsGeneration) {
-                if (
-                  current.state === "cleared" &&
-                  current.retired === true &&
-                  current.sessionId === mutation.expectedPreviousSessionId
-                ) {
-                  // Reset boundaries now retain the OpenClaw session id. The
-                  // authoritative session-store check above proves this fence
-                  // belongs to the previous in-place lifecycle, not live work.
+        let committed: boolean;
+        try {
+          committed = await transactKey(
+            key,
+            (current, leaseToken) => {
+              const ownsGeneration = ownsStoredSessionGeneration(identity, current);
+              previousReference =
+                current?.state === "active"
+                  ? current.binding.agentWorkspaceDeveloperInstructionsRef
+                  : undefined;
+              nextReference = previousReference;
+              const ownedLease =
+                current?.lease && current.lease.token === leaseToken
+                  ? { lease: current.lease }
+                  : {};
+              if (mutation.kind === "reclaim-generation") {
+                if (identity.kind !== "session" || !identity.sessionKey?.trim()) {
+                  return { result: false };
+                }
+                if (!current) {
+                  return { result: true };
+                }
+                if (ownsGeneration) {
+                  if (
+                    current.state === "cleared" &&
+                    current.retired === true &&
+                    current.sessionId === mutation.expectedPreviousSessionId
+                  ) {
+                    // Reset boundaries now retain the OpenClaw session id. The
+                    // authoritative session-store check above proves this fence
+                    // belongs to the previous in-place lifecycle, not live work.
+                    return {
+                      result: true,
+                      next: {
+                        version: 1,
+                        state: "cleared",
+                        sessionId: identity.sessionId,
+                        ...ownedLease,
+                      },
+                    };
+                  }
                   return {
-                    result: true,
-                    next: {
-                      version: 1,
-                      state: "cleared",
-                      sessionId: identity.sessionId,
-                      ...ownedLease,
-                    },
+                    result: current.state !== "cleared" || current.retired !== true,
                   };
                 }
+                if (current.sessionId !== mutation.expectedPreviousSessionId) {
+                  return { result: false };
+                }
+                // A stale physical generation must never turn private user-home ownership into
+                // an ordinary empty binding. Supervision adoption has an explicit generation
+                // transfer path; every other successor fails closed and preserves this owner.
+                if (
+                  current.state === "active" &&
+                  current.binding.connectionScope === "supervision"
+                ) {
+                  return { result: false };
+                }
+                nextReference = undefined;
                 return {
-                  result: current.state !== "cleared" || current.retired !== true,
+                  result: true,
+                  next: {
+                    version: 1,
+                    state: "cleared",
+                    sessionId: identity.sessionId,
+                    ...ownedLease,
+                  },
                 };
               }
-              if (current.sessionId !== mutation.expectedPreviousSessionId) {
+              const storedActive = current?.state === "active" ? current : undefined;
+              const active = ownsGeneration ? storedActive : undefined;
+              const retiredGeneration =
+                current?.state === "cleared" && current.retired === true && ownsGeneration;
+              const preservesSupervisionOwner =
+                mutation.kind === "set" &&
+                active?.binding.connectionScope === "supervision" &&
+                isSameSupervisionOwner(active.binding, mutation.binding);
+              const clearsPendingSupervisionOwner =
+                mutation.kind === "clear" &&
+                active?.binding.connectionScope === "supervision" &&
+                matchesPendingSupervisionClear(
+                  active.binding,
+                  mutation.threadId,
+                  mutation.expectedPendingSupervisionBranch,
+                );
+              const replacesExpectedOrdinaryOwner =
+                mutation.kind === "replace-thread" &&
+                active?.binding.threadId === mutation.expectedThreadId &&
+                active.binding.connectionScope !== "supervision" &&
+                mutation.binding.connectionScope !== "supervision" &&
+                mutation.binding.threadId !== mutation.expectedThreadId;
+              if (
+                (mutation.kind === "set" &&
+                  ((mutation.if?.kind === "absent" && storedActive) ||
+                    (current !== undefined && !ownsGeneration) ||
+                    retiredGeneration ||
+                    (active?.binding.connectionScope === "supervision" &&
+                      !preservesSupervisionOwner))) ||
+                (mutation.kind === "patch" && active?.binding.threadId !== mutation.threadId) ||
+                (mutation.kind === "replace-thread" && !replacesExpectedOrdinaryOwner) ||
+                ((mutation.kind === "patch-pending-supervision-branch" ||
+                  mutation.kind === "commit-pending-supervision-branch") &&
+                  !matchesPendingSupervisionBranch(active?.binding, mutation.expected)) ||
+                (mutation.kind === "clear" &&
+                  ((mutation.threadId !== undefined &&
+                    active?.binding.threadId !== mutation.threadId) ||
+                    !ownsGeneration ||
+                    (active?.binding.connectionScope === "supervision" &&
+                      !clearsPendingSupervisionOwner)))
+              ) {
                 return { result: false };
               }
-              // A stale physical generation must never turn private user-home ownership into
-              // an ordinary empty binding. Supervision adoption has an explicit generation
-              // transfer path; every other successor fails closed and preserves this owner.
-              if (current.state === "active" && current.binding.connectionScope === "supervision") {
-                return { result: false };
+              if (mutation.kind === "clear" && retiredGeneration) {
+                return { result: true };
               }
-              return {
-                result: true,
-                next: {
-                  version: 1,
-                  state: "cleared",
-                  sessionId: identity.sessionId,
-                  ...ownedLease,
+              if (mutation.kind === "clear") {
+                nextReference = undefined;
+                return {
+                  result: true,
+                  next: {
+                    version: 1,
+                    state: "cleared",
+                    ...storedSessionGeneration(identity, current),
+                    ...ownedLease,
+                  },
+                };
+              }
+              let binding: CodexAppServerThreadBinding;
+              if (mutation.kind === "set" || mutation.kind === "replace-thread") {
+                binding = validateBindingForWrite(mutation.binding);
+              } else if (mutation.kind === "patch-pending-supervision-branch") {
+                binding = validateBindingForWrite({
+                  ...active!.binding,
+                  pendingSupervisionBranch: mutation.pending,
+                });
+              } else if (mutation.kind === "commit-pending-supervision-branch") {
+                binding = validateBindingForWrite({
+                  ...active!.binding,
+                  ...mutation.patch,
+                  threadId: mutation.threadId,
+                  pendingSupervisionBranch: undefined,
+                });
+              } else {
+                binding = validateBindingForWrite({
+                  ...active!.binding,
+                  ...mutation.patch,
+                  threadId: mutation.threadId,
+                });
+              }
+              const storedBinding = externalizeInstructionBinding(
+                {
+                  ...binding,
+                  ...(hasInstructionUpdate ||
+                  mutation.kind === "set" ||
+                  mutation.kind === "replace-thread"
+                    ? { agentWorkspaceDeveloperInstructionsRef: undefined }
+                    : active?.binding.agentWorkspaceDeveloperInstructionsRef
+                      ? {
+                          agentWorkspaceDeveloperInstructionsRef:
+                            active.binding.agentWorkspaceDeveloperInstructionsRef,
+                        }
+                      : {}),
                 },
-              };
-            }
-            const storedActive = current?.state === "active" ? current : undefined;
-            const active = ownsGeneration ? storedActive : undefined;
-            const retiredGeneration =
-              current?.state === "cleared" && current.retired === true && ownsGeneration;
-            const preservesSupervisionOwner =
-              mutation.kind === "set" &&
-              active?.binding.connectionScope === "supervision" &&
-              isSameSupervisionOwner(active.binding, mutation.binding);
-            const clearsPendingSupervisionOwner =
-              mutation.kind === "clear" &&
-              active?.binding.connectionScope === "supervision" &&
-              matchesPendingSupervisionClear(
-                active.binding,
-                mutation.threadId,
-                mutation.expectedPendingSupervisionBranch,
+                retainedReference,
               );
-            const replacesExpectedOrdinaryOwner =
-              mutation.kind === "replace-thread" &&
-              active?.binding.threadId === mutation.expectedThreadId &&
-              active.binding.connectionScope !== "supervision" &&
-              mutation.binding.connectionScope !== "supervision" &&
-              mutation.binding.threadId !== mutation.expectedThreadId;
-            if (
-              (mutation.kind === "set" &&
-                ((mutation.if?.kind === "absent" && storedActive) ||
-                  (current !== undefined && !ownsGeneration) ||
-                  retiredGeneration ||
-                  (active?.binding.connectionScope === "supervision" &&
-                    !preservesSupervisionOwner))) ||
-              (mutation.kind === "patch" && active?.binding.threadId !== mutation.threadId) ||
-              (mutation.kind === "replace-thread" && !replacesExpectedOrdinaryOwner) ||
-              ((mutation.kind === "patch-pending-supervision-branch" ||
-                mutation.kind === "commit-pending-supervision-branch") &&
-                !matchesPendingSupervisionBranch(active?.binding, mutation.expected)) ||
-              (mutation.kind === "clear" &&
-                ((mutation.threadId !== undefined &&
-                  active?.binding.threadId !== mutation.threadId) ||
-                  !ownsGeneration ||
-                  (active?.binding.connectionScope === "supervision" &&
-                    !clearsPendingSupervisionOwner)))
-            ) {
-              return { result: false };
-            }
-            if (mutation.kind === "clear" && retiredGeneration) {
-              return { result: true };
-            }
-            if (mutation.kind === "clear") {
+              nextReference = storedBinding.agentWorkspaceDeveloperInstructionsRef;
               return {
                 result: true,
                 next: {
                   version: 1,
-                  state: "cleared",
+                  state: "active",
+                  binding: storedBinding,
                   ...storedSessionGeneration(identity, current),
                   ...ownedLease,
                 },
               };
-            }
-            let binding: CodexAppServerThreadBinding;
-            if (mutation.kind === "set" || mutation.kind === "replace-thread") {
-              binding = validateBindingForWrite(mutation.binding);
-            } else if (mutation.kind === "patch-pending-supervision-branch") {
-              binding = validateBindingForWrite({
-                ...active!.binding,
-                pendingSupervisionBranch: mutation.pending,
-              });
-            } else if (mutation.kind === "commit-pending-supervision-branch") {
-              binding = validateBindingForWrite({
-                ...active!.binding,
-                ...mutation.patch,
-                threadId: mutation.threadId,
-                pendingSupervisionBranch: undefined,
-              });
-            } else {
-              binding = validateBindingForWrite({
-                ...active!.binding,
-                ...mutation.patch,
-                threadId: mutation.threadId,
-              });
-            }
-            return {
-              result: true,
-              next: {
-                version: 1,
-                state: "active",
-                binding,
-                ...storedSessionGeneration(identity, current),
-                ...ownedLease,
-              },
-            };
-          },
-          // Plain clears may expire immediately: a stale generation that re-sets
-          // the key afterwards is fenced by ownsStoredSessionGeneration on read
-          // and displaced via reclaim-generation; durable stable-key fences come
-          // from retireSessionGeneration, not runtime clears.
-          mutation.kind === "clear" && !retainLegacyClear && !leaseContext.getStore()?.has(key)
-            ? 1
-            : undefined,
-        );
+            },
+            // Plain clears may expire immediately: a stale generation that re-sets
+            // the key afterwards is fenced by ownsStoredSessionGeneration on read
+            // and displaced via reclaim-generation; durable stable-key fences come
+            // from retireSessionGeneration, not runtime clears.
+            mutation.kind === "clear" && !retainLegacyClear && !leaseContext.getStore()?.has(key)
+              ? 1
+              : undefined,
+          );
+        } catch (error) {
+          if (retainedReference && instructionBlobs) {
+            await releaseCodexInstructionBlob(instructionBlobs, retainedReference);
+          }
+          throw error;
+        }
+        if (instructionBlobs) {
+          if (!committed && retainedReference) {
+            await releaseCodexInstructionBlob(instructionBlobs, retainedReference);
+          } else if (committed && previousReference === retainedReference && retainedReference) {
+            await releaseCodexInstructionBlob(instructionBlobs, retainedReference);
+          } else if (committed && previousReference && previousReference !== nextReference) {
+            await releaseCodexInstructionBlob(instructionBlobs, previousReference);
+          }
+        }
+        return committed;
       });
     },
 
@@ -1069,7 +1227,8 @@ export function createCodexAppServerBindingStore(
     async resetSessionGeneration(identity) {
       return await runBindingMutation(async () => {
         const key = bindingStoreKey(identity);
-        return await transactKey(
+        let previousReference: string | undefined;
+        const result = await transactKey(
           key,
           (current, leaseToken) => {
             if (!current) {
@@ -1078,6 +1237,10 @@ export function createCodexAppServerBindingStore(
             if (!ownsStoredSessionGeneration(identity, current)) {
               return { result: "conflict" as const };
             }
+            previousReference =
+              current.state === "active"
+                ? current.binding.agentWorkspaceDeveloperInstructionsRef
+                : undefined;
             // A retired same-id row may be a deletion fence. Only the authoritative
             // session-store reclaim path can prove it belongs to an in-place reset.
             if (current.state === "cleared" && current.retired === true) {
@@ -1097,13 +1260,18 @@ export function createCodexAppServerBindingStore(
           },
           leaseContext.getStore()?.has(key) ? undefined : 1,
         );
+        if (result === "applied" && previousReference && instructionBlobs) {
+          await releaseCodexInstructionBlob(instructionBlobs, previousReference);
+        }
+        return result;
       });
     },
 
     async retireSessionGeneration(identity) {
       return await runBindingMutation(async () => {
         const key = bindingStoreKey(identity);
-        return await transactKey(
+        let previousReference: string | undefined;
+        const result = await transactKey(
           key,
           (current, leaseToken) => {
             if (!current) {
@@ -1112,6 +1280,10 @@ export function createCodexAppServerBindingStore(
             if (!ownsStoredSessionGeneration(identity, current)) {
               return { result: "conflict" as const };
             }
+            previousReference =
+              current.state === "active"
+                ? current.binding.agentWorkspaceDeveloperInstructionsRef
+                : undefined;
             if (current.state === "cleared" && current.retired === true) {
               return { result: "applied" as const };
             }
@@ -1130,6 +1302,10 @@ export function createCodexAppServerBindingStore(
           },
           identity.sessionKey?.trim() ? undefined : PHYSICAL_SESSION_RETIRE_TTL_MS,
         );
+        if (result === "applied" && previousReference && instructionBlobs) {
+          await releaseCodexInstructionBlob(instructionBlobs, previousReference);
+        }
+        return result;
       });
     },
 
@@ -1343,6 +1519,24 @@ export function readStoredCodexAppServerBinding(
     : undefined;
 }
 
+/** Doctor-only parser for pre-blob inline rows from existing main/nightly state. */
+export function readLegacyStoredCodexAppServerBinding(
+  value: unknown,
+): LegacyStoredCodexAppServerBinding | undefined {
+  const result = legacyStoredBindingSchema.safeParse(value);
+  if (!result.success) {
+    return undefined;
+  }
+  return legacyStoredBindingSchema.parse(stripUndefinedValue(result.data));
+}
+
+/** Doctor-only parser accepting either side of the inline-to-reference migration. */
+export function readDoctorStoredCodexAppServerBinding(
+  value: unknown,
+): DoctorStoredCodexAppServerBinding | undefined {
+  return readStoredCodexAppServerBinding(value) ?? readLegacyStoredCodexAppServerBinding(value);
+}
+
 function storedSessionGeneration(
   identity: CodexAppServerBindingIdentity,
   current: StoredCodexAppServerBinding | undefined,
@@ -1386,7 +1580,7 @@ function validateBindingForWrite(
 export function readCodexAppServerThreadBinding(
   value: unknown,
 ): CodexAppServerThreadBinding | undefined {
-  const result = threadBindingSchema.safeParse(value);
+  const result = domainThreadBindingSchema.safeParse(value);
   if (!result.success) {
     return undefined;
   }

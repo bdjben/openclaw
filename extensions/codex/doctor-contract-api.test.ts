@@ -3,10 +3,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  createPluginBlobStoreForTests,
   createPluginStateKeyedStoreForTests,
+  openOpenClawStateDatabase,
+  resetPluginBlobStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type {
+  OpenBlobStoreOptions,
   OpenKeyedStoreOptions,
   PluginDoctorStateMigrationContext,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
@@ -18,10 +22,14 @@ import {
   normalizeCompatibilityConfig,
   stateMigrations,
 } from "./doctor-contract-api.js";
+import { codexInstructionBlobReference } from "./src/app-server/instruction-blob.js";
 import {
   bindingStoreKey,
   CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
   CODEX_APP_SERVER_BINDING_NAMESPACE,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
   createStoredCodexAppServerBinding,
   hashCodexAppServerBindingFingerprint,
   type StoredCodexAppServerBinding,
@@ -33,6 +41,9 @@ function createDoctorContext(
   afterRegister?: () => Promise<void>,
 ): PluginDoctorStateMigrationContext {
   return {
+    openPluginBlobStore<T>(options: OpenBlobStoreOptions) {
+      return createPluginBlobStoreForTests<T>("codex", options, env);
+    },
     openPluginStateKeyedStore<T>(options: OpenKeyedStoreOptions) {
       const store = createPluginStateKeyedStoreForTests<T>("codex", {
         ...options,
@@ -60,12 +71,27 @@ function openBindingStore(env: NodeJS.ProcessEnv) {
   });
 }
 
+function openInstructionBlobStore(env: NodeJS.ProcessEnv) {
+  return createPluginBlobStoreForTests<{ version: 1; refCount: number }>(
+    "codex",
+    {
+      namespace: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
+      maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+      maxBytesPerEntry: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+      maxBytesPerNamespace: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+      overflowPolicy: "reject-new",
+    },
+    env,
+  );
+}
+
 async function removeCodexDoctorFixture(stateDir: string): Promise<void> {
   // Doctor migrations open per-agent databases and leave the shared state database open under
   // the temporary state dir; both must be released before removal or Windows keeps the files
   // locked and the removal fails with EBUSY. Agent close first: it releases leases through
   // shared state, so the reverse order can reopen it.
   closeOpenClawAgentDatabasesForTest();
+  resetPluginBlobStoreForTests();
   resetPluginStateStoreForTests();
   await fs.rm(stateDir, { recursive: true, force: true });
 }
@@ -137,6 +163,7 @@ async function createBindingMigrationFixture(options: {
 }
 
 afterEach(() => {
+  resetPluginBlobStoreForTests();
   resetPluginStateStoreForTests();
 });
 
@@ -288,6 +315,8 @@ describe("codex doctor contract", () => {
   });
 
   it("imports and archives shipped binding sidecars", async () => {
+    const instructions = `# Frozen legacy policy\n${"multibyte-🦀\n".repeat(6_000)}`;
+    expect(Buffer.byteLength(instructions)).toBeGreaterThan(65_536);
     const fixture = await createBindingMigrationFixture({
       name: "session-current",
       sessionIndex: {
@@ -299,6 +328,7 @@ describe("codex doctor contract", () => {
       },
       threadId: "thread-1",
       binding: {
+        agentWorkspaceDeveloperInstructions: instructions,
         pluginAppPolicyContext: {
           fingerprint: "policy-1",
           apps: {
@@ -339,6 +369,7 @@ describe("codex doctor contract", () => {
       sessionId: "session-current",
       binding: {
         threadId: "thread-1",
+        agentWorkspaceDeveloperInstructionsRef: codexInstructionBlobReference(instructions),
         pluginAppPolicyContext: {
           apps: { app: { destructiveApprovalMode: "ask" } },
         },
@@ -351,7 +382,19 @@ describe("codex doctor contract", () => {
           bindingId: legacyCodexConversationBindingId(fixture.transcriptPath),
         }),
       ),
-    ).resolves.toMatchObject({ state: "active", binding: { threadId: "thread-1" } });
+    ).resolves.toMatchObject({
+      state: "active",
+      binding: {
+        threadId: "thread-1",
+        agentWorkspaceDeveloperInstructionsRef: codexInstructionBlobReference(instructions),
+      },
+    });
+    await expect(
+      openInstructionBlobStore(fixture.env).lookup(codexInstructionBlobReference(instructions)),
+    ).resolves.toMatchObject({
+      bytes: new TextEncoder().encode(instructions),
+      metadata: { version: 1, refCount: 2 },
+    });
     await expect(fs.access(`${fixture.sidecarPath}.migrated`)).resolves.toBeUndefined();
     expect(
       getSessionEntry({
@@ -369,6 +412,375 @@ describe("codex doctor contract", () => {
     ).resolves.not.toHaveProperty("agent:main:session-1.agentHarnessId");
 
     await removeCodexDoctorFixture(fixture.stateDir);
+  });
+
+  it("migrates inline binding rows and reconciles crash-leaked blob references", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-doctor-inline-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const context = createDoctorContext(env);
+    const store = openBindingStore(env);
+    const blobs = openInstructionBlobStore(env);
+    const migration = stateMigrations[1]!;
+    const instructions = "Legacy frozen instructions shared by two bindings.";
+    const reference = codexInstructionBlobReference(instructions);
+    const orphanReference = `sha256:${"0".repeat(64)}`;
+    try {
+      for (const bindingId of ["inline-one", "inline-two"]) {
+        await store.register(bindingStoreKey({ kind: "conversation", bindingId }), {
+          version: 1,
+          state: "active",
+          binding: {
+            threadId: `thread-${bindingId}`,
+            cwd: "/repo",
+            agentWorkspaceDeveloperInstructions: instructions,
+          },
+        } as unknown as StoredCodexAppServerBinding);
+      }
+      await blobs.register(orphanReference, new TextEncoder().encode("crash leak"), {
+        version: 1,
+        refCount: 7,
+      });
+      const params = {
+        config: {},
+        env,
+        stateDir,
+        oauthDir: path.join(stateDir, "oauth"),
+        context,
+      };
+
+      await expect(migration.detectLegacyState(params)).resolves.toMatchObject({
+        preview: [expect.stringContaining("2 inline instruction snapshot")],
+      });
+      await expect(migration.migrateLegacyState(params)).resolves.toEqual({
+        changes: [expect.stringContaining("Migrated 2")],
+        warnings: [],
+      });
+      for (const bindingId of ["inline-one", "inline-two"]) {
+        await expect(
+          store.lookup(bindingStoreKey({ kind: "conversation", bindingId })),
+        ).resolves.toMatchObject({
+          state: "active",
+          binding: { agentWorkspaceDeveloperInstructionsRef: reference },
+        });
+      }
+      await expect(blobs.lookup(reference)).resolves.toMatchObject({
+        bytes: new TextEncoder().encode(instructions),
+        metadata: { version: 1, refCount: 2 },
+      });
+      await expect(blobs.lookup(orphanReference)).resolves.toBeUndefined();
+    } finally {
+      await removeCodexDoctorFixture(stateDir);
+    }
+  });
+
+  it("compensates a retained instruction blob when inline-row migration loses CAS", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-doctor-cas-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const baseContext = createDoctorContext(env);
+    const store = openBindingStore(env);
+    const blobs = openInstructionBlobStore(env);
+    const instructions = "Inline snapshot whose row changes during doctor repair.";
+    const reference = codexInstructionBlobReference(instructions);
+    const uncertainInstructions = "Blob that an unreadable row could still reference.";
+    const uncertainReference = codexInstructionBlobReference(uncertainInstructions);
+    try {
+      await store.register("conversation:cas-conflict", {
+        version: 1,
+        state: "active",
+        binding: {
+          threadId: "thread-cas-conflict",
+          cwd: "/repo",
+          agentWorkspaceDeveloperInstructions: instructions,
+        },
+      } as unknown as StoredCodexAppServerBinding);
+      await blobs.register(uncertainReference, new TextEncoder().encode(uncertainInstructions), {
+        version: 1,
+        refCount: 1,
+      });
+      const context: PluginDoctorStateMigrationContext = {
+        ...baseContext,
+        openPluginStateKeyedStore<T>(options: OpenKeyedStoreOptions) {
+          const opened = baseContext.openPluginStateKeyedStore<T>(options);
+          return { ...opened, update: async () => false };
+        },
+      };
+      const result = await stateMigrations[1]!.migrateLegacyState({
+        config: {},
+        env,
+        stateDir,
+        oauthDir: path.join(stateDir, "oauth"),
+        context,
+      });
+
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("changed during migration"),
+          expect.stringContaining("binding census is incomplete"),
+        ]),
+      );
+      await expect(blobs.lookup(reference)).resolves.toBeUndefined();
+      await expect(blobs.lookup(uncertainReference)).resolves.toBeDefined();
+      await expect(store.lookup("conversation:cas-conflict")).resolves.toHaveProperty(
+        "binding.agentWorkspaceDeveloperInstructions",
+        instructions,
+      );
+    } finally {
+      await removeCodexDoctorFixture(stateDir);
+    }
+  });
+
+  it("repairs referenced instruction blobs with valid bytes and wrong-shape metadata", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-doctor-metadata-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const context = createDoctorContext(env);
+    const store = openBindingStore(env);
+    const blobs = openInstructionBlobStore(env);
+    const instructions = "Frozen instructions with repairable metadata.";
+    const reference = codexInstructionBlobReference(instructions);
+    try {
+      await store.register("conversation:metadata-repair", {
+        version: 1,
+        state: "active",
+        binding: {
+          threadId: "thread-metadata-repair",
+          cwd: "/repo",
+          agentWorkspaceDeveloperInstructionsRef: reference,
+        },
+      });
+      await blobs.register(reference, new TextEncoder().encode(instructions), {
+        version: 2,
+        refCount: 99,
+      } as never);
+      const params = {
+        config: {},
+        env,
+        stateDir,
+        oauthDir: path.join(stateDir, "oauth"),
+        context,
+      };
+
+      await expect(stateMigrations[1]!.detectLegacyState(params)).resolves.toBeTruthy();
+      await expect(stateMigrations[1]!.migrateLegacyState(params)).resolves.toEqual({
+        changes: [],
+        warnings: [],
+      });
+      await expect(blobs.lookup(reference)).resolves.toMatchObject({
+        bytes: new TextEncoder().encode(instructions),
+        metadata: { version: 1, refCount: 1 },
+      });
+    } finally {
+      await removeCodexDoctorFixture(stateDir);
+    }
+  });
+
+  it("diagnoses a referenced digest mismatch without deleting orphan blobs", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-doctor-digest-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const context = createDoctorContext(env);
+    const store = openBindingStore(env);
+    const blobs = openInstructionBlobStore(env);
+    const reference = codexInstructionBlobReference("Expected frozen instructions.");
+    const orphanInstructions = "Unreferenced content retained under unsafe census.";
+    const orphanReference = codexInstructionBlobReference(orphanInstructions);
+    try {
+      await store.register("conversation:digest-mismatch", {
+        version: 1,
+        state: "active",
+        binding: {
+          threadId: "thread-digest-mismatch",
+          cwd: "/repo",
+          agentWorkspaceDeveloperInstructionsRef: reference,
+        },
+      });
+      await blobs.register(reference, new TextEncoder().encode("Different valid UTF-8 bytes."), {
+        version: 1,
+        refCount: 1,
+      });
+      await blobs.register(orphanReference, new TextEncoder().encode(orphanInstructions), {
+        version: 1,
+        refCount: 1,
+      });
+      const params = {
+        config: {},
+        env,
+        stateDir,
+        oauthDir: path.join(stateDir, "oauth"),
+        context,
+      };
+
+      await expect(stateMigrations[1]!.detectLegacyState(params)).resolves.toBeTruthy();
+      const result = await stateMigrations[1]!.migrateLegacyState(params);
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("digest mismatch"),
+          expect.stringContaining("referenced blob content is unsafe"),
+        ]),
+      );
+      await expect(blobs.lookup(reference)).resolves.toBeDefined();
+      await expect(blobs.lookup(orphanReference)).resolves.toBeDefined();
+    } finally {
+      await removeCodexDoctorFixture(stateDir);
+    }
+  });
+
+  it("diagnoses invalid UTF-8 in a referenced instruction blob without cleanup", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-doctor-utf8-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const context = createDoctorContext(env);
+    const store = openBindingStore(env);
+    const blobs = openInstructionBlobStore(env);
+    const reference = codexInstructionBlobReference("Expected UTF-8 instructions.");
+    const orphanInstructions = "Orphan retained while referenced UTF-8 is invalid.";
+    const orphanReference = codexInstructionBlobReference(orphanInstructions);
+    try {
+      await store.register("conversation:invalid-utf8", {
+        version: 1,
+        state: "active",
+        binding: {
+          threadId: "thread-invalid-utf8",
+          cwd: "/repo",
+          agentWorkspaceDeveloperInstructionsRef: reference,
+        },
+      });
+      await blobs.register(reference, Uint8Array.of(0xff), { version: 1, refCount: 1 });
+      await blobs.register(orphanReference, new TextEncoder().encode(orphanInstructions), {
+        version: 1,
+        refCount: 1,
+      });
+      const params = {
+        config: {},
+        env,
+        stateDir,
+        oauthDir: path.join(stateDir, "oauth"),
+        context,
+      };
+
+      await expect(stateMigrations[1]!.detectLegacyState(params)).resolves.toBeTruthy();
+      const result = await stateMigrations[1]!.migrateLegacyState(params);
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("not valid UTF-8"),
+          expect.stringContaining("referenced blob content is unsafe"),
+        ]),
+      );
+      await expect(blobs.lookup(reference)).resolves.toBeDefined();
+      await expect(blobs.lookup(orphanReference)).resolves.toBeDefined();
+    } finally {
+      await removeCodexDoctorFixture(stateDir);
+    }
+  });
+
+  it("diagnoses invalid instruction metadata JSON without destructive cleanup", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-doctor-json-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const context = createDoctorContext(env);
+    const store = openBindingStore(env);
+    const blobs = openInstructionBlobStore(env);
+    const instructions = "Frozen instructions with corrupt metadata JSON.";
+    const reference = codexInstructionBlobReference(instructions);
+    const orphanInstructions = "Orphan retained while metadata census is unreadable.";
+    const orphanReference = codexInstructionBlobReference(orphanInstructions);
+    try {
+      await store.register("conversation:invalid-metadata-json", {
+        version: 1,
+        state: "active",
+        binding: {
+          threadId: "thread-invalid-metadata-json",
+          cwd: "/repo",
+          agentWorkspaceDeveloperInstructionsRef: reference,
+        },
+      });
+      await blobs.register(reference, new TextEncoder().encode(instructions), {
+        version: 1,
+        refCount: 1,
+      });
+      await blobs.register(orphanReference, new TextEncoder().encode(orphanInstructions), {
+        version: 1,
+        refCount: 1,
+      });
+      const { db } = openOpenClawStateDatabase({ env });
+      db.prepare(
+        `UPDATE plugin_blob_entries SET metadata_json = ?
+         WHERE plugin_id = ? AND namespace = ? AND entry_key = ?`,
+      ).run("{", "codex", CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE, reference);
+      const params = {
+        config: {},
+        env,
+        stateDir,
+        oauthDir: path.join(stateDir, "oauth"),
+        context,
+      };
+
+      await expect(stateMigrations[1]!.detectLegacyState(params)).resolves.toMatchObject({
+        preview: [expect.stringContaining("unreadable instruction blob metadata")],
+      });
+      const result = await stateMigrations[1]!.migrateLegacyState(params);
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("metadata census is unreadable"),
+          expect.stringContaining("blob census is unsafe"),
+        ]),
+      );
+      expect(
+        db
+          .prepare(
+            `SELECT entry_key FROM plugin_blob_entries
+             WHERE plugin_id = ? AND namespace = ? ORDER BY entry_key`,
+          )
+          .all("codex", CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE),
+      ).toEqual(
+        [{ entry_key: orphanReference }, { entry_key: reference }].toSorted((a, b) =>
+          a.entry_key.localeCompare(b.entry_key),
+        ),
+      );
+    } finally {
+      await removeCodexDoctorFixture(stateDir);
+    }
+  });
+
+  it("diagnoses a missing referenced instruction blob without deleting orphans", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-doctor-missing-"));
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const context = createDoctorContext(env);
+    const store = openBindingStore(env);
+    const blobs = openInstructionBlobStore(env);
+    const missingReference = codexInstructionBlobReference("Missing frozen instructions.");
+    const orphanInstructions = "Orphan retained while a live reference is missing.";
+    const orphanReference = codexInstructionBlobReference(orphanInstructions);
+    try {
+      await store.register("conversation:missing-reference", {
+        version: 1,
+        state: "active",
+        binding: {
+          threadId: "thread-missing-reference",
+          cwd: "/repo",
+          agentWorkspaceDeveloperInstructionsRef: missingReference,
+        },
+      });
+      await blobs.register(orphanReference, new TextEncoder().encode(orphanInstructions), {
+        version: 1,
+        refCount: 1,
+      });
+      const params = {
+        config: {},
+        env,
+        stateDir,
+        oauthDir: path.join(stateDir, "oauth"),
+        context,
+      };
+
+      await expect(stateMigrations[1]!.detectLegacyState(params)).resolves.toBeTruthy();
+      const result = await stateMigrations[1]!.migrateLegacyState(params);
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(`missing for ${missingReference}`),
+          expect.stringContaining("referenced blob content is unsafe"),
+        ]),
+      );
+      await expect(blobs.lookup(orphanReference)).resolves.toBeDefined();
+    } finally {
+      await removeCodexDoctorFixture(stateDir);
+    }
   });
 
   it.each([

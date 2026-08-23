@@ -16,13 +16,26 @@ import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
 import {
   archiveLegacyStateSource,
   legacyStateFileExists,
+  type PluginDoctorStateMigrationContext,
   type PluginDoctorStateMigration,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
 import { pathExists } from "openclaw/plugin-sdk/security-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
+  codexInstructionBlobReference,
+  releaseCodexInstructionBlob,
+  readCodexInstructionBlobMetadata,
+  retainCodexInstructionBlob,
+  retainCodexInstructionBlobReference,
+  type CodexInstructionBlobReconciliationStore,
+  verifyCodexInstructionBlob,
+} from "../app-server/instruction-blob.js";
+import {
   CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
   CODEX_APP_SERVER_BINDING_NAMESPACE,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+  CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
 } from "../app-server/session-binding-meta.js";
 
 const LEGACY_BINDING_SUFFIX = ".codex-app-server.json";
@@ -79,6 +92,180 @@ type SourceMigrationResult = {
   notice?: string;
   warning?: string;
 };
+
+function openInstructionBlobStore(
+  context: PluginDoctorStateMigrationContext,
+): CodexInstructionBlobReconciliationStore {
+  if (!context.openPluginBlobStore) {
+    throw new Error("Codex instruction migration requires doctor blob-store support");
+  }
+  return context.openPluginBlobStore({
+    namespace: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_NAMESPACE,
+    maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+    maxBytesPerEntry: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_BYTES,
+    maxBytesPerNamespace: CODEX_APP_SERVER_INSTRUCTIONS_BLOB_MAX_TOTAL_BYTES,
+    overflowPolicy: "reject-new",
+  });
+}
+
+function readInstructionBindingRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+function externalizeInlineInstructions(row: MigratedBindingRow): MigratedBindingRow {
+  if (row.state !== "active" || !isRecord(row.binding)) {
+    return row;
+  }
+  const instructions = row.binding.agentWorkspaceDeveloperInstructions;
+  if (typeof instructions !== "string" || !instructions.trim()) {
+    return row;
+  }
+  const reference = codexInstructionBlobReference(instructions);
+  const binding = { ...row.binding };
+  delete binding.agentWorkspaceDeveloperInstructions;
+  binding.agentWorkspaceDeveloperInstructionsRef = reference;
+  return { ...row, binding };
+}
+
+type PreparedInstructionOwner = {
+  row: MigratedBindingRow;
+  retainedReference?: string;
+};
+
+async function retainInlineInstructionOwner(
+  row: MigratedBindingRow,
+  blobs: CodexInstructionBlobReconciliationStore,
+): Promise<PreparedInstructionOwner> {
+  if (row.state !== "active" || !isRecord(row.binding)) {
+    return { row };
+  }
+  const instructions = row.binding.agentWorkspaceDeveloperInstructions;
+  if (typeof instructions !== "string" || !instructions.trim()) {
+    return { row };
+  }
+  const retainedReference = await retainCodexInstructionBlob({ store: blobs, instructions });
+  return { row: externalizeInlineInstructions(row), retainedReference };
+}
+
+async function retainInstructionOwner(
+  row: MigratedBindingRow,
+  blobs: CodexInstructionBlobReconciliationStore,
+): Promise<PreparedInstructionOwner> {
+  const inline = await retainInlineInstructionOwner(row, blobs);
+  if (inline.retainedReference || inline.row.state !== "active" || !isRecord(inline.row.binding)) {
+    return inline;
+  }
+  const reference = inline.row.binding.agentWorkspaceDeveloperInstructionsRef;
+  if (typeof reference !== "string") {
+    return inline;
+  }
+  await retainCodexInstructionBlobReference(blobs, reference);
+  return { row: inline.row, retainedReference: reference };
+}
+
+async function releasePreparedInstructionOwner(
+  prepared: PreparedInstructionOwner,
+  blobs: CodexInstructionBlobReconciliationStore,
+): Promise<void> {
+  if (prepared.retainedReference) {
+    await releaseCodexInstructionBlob(blobs, prepared.retainedReference);
+  }
+}
+
+async function reconcileInstructionBlobReferences(params: {
+  store: PluginStateKeyedStore<MigratedBindingRow>;
+  blobs: CodexInstructionBlobReconciliationStore;
+  readStored: (value: unknown) => MigratedBindingRow | undefined;
+}): Promise<string[]> {
+  const warnings: string[] = [];
+  const counts = new Map<string, number>();
+  let completeCensus = true;
+  for (const { key, value } of await params.store.entries()) {
+    const stored = params.readStored(value);
+    if (!stored) {
+      completeCensus = false;
+      warnings.push(`Codex instruction references could not inspect invalid binding row ${key}`);
+      continue;
+    }
+    if (stored.state !== "active" || !isRecord(stored.binding)) {
+      continue;
+    }
+    if (stored.binding.agentWorkspaceDeveloperInstructions) {
+      completeCensus = false;
+      warnings.push(`Codex inline instruction binding remains unreconciled at ${key}`);
+      continue;
+    }
+    const reference = stored.binding.agentWorkspaceDeveloperInstructionsRef;
+    if (typeof reference === "string") {
+      counts.set(reference, (counts.get(reference) ?? 0) + 1);
+    }
+  }
+
+  if (!completeCensus) {
+    warnings.push(
+      "Skipped Codex instruction blob cleanup because the binding census is incomplete",
+    );
+    return warnings;
+  }
+
+  let entries: Awaited<ReturnType<CodexInstructionBlobReconciliationStore["entries"]>>;
+  try {
+    entries = await params.blobs.entries();
+  } catch (error) {
+    warnings.push(`Codex instruction blob metadata census is unreadable: ${String(error)}`);
+    warnings.push(
+      "Skipped Codex instruction blob repair and cleanup because the blob census is unsafe",
+    );
+    return warnings;
+  }
+  const present = new Set(entries.map((entry) => entry.key));
+  let safeBlobCensus = true;
+  for (const reference of counts.keys()) {
+    if (!present.has(reference)) {
+      warnings.push(`Codex instruction blob is missing for ${reference}`);
+      safeBlobCensus = false;
+      continue;
+    }
+    try {
+      const current = await params.blobs.lookup(reference);
+      if (!current) {
+        warnings.push(`Codex instruction blob is missing for ${reference}`);
+        safeBlobCensus = false;
+        continue;
+      }
+      verifyCodexInstructionBlob(reference, current.bytes);
+    } catch (error) {
+      warnings.push(`Codex instruction blob is invalid for ${reference}: ${String(error)}`);
+      safeBlobCensus = false;
+    }
+  }
+  if (!safeBlobCensus) {
+    warnings.push(
+      "Skipped Codex instruction blob repair and cleanup because referenced blob content is unsafe",
+    );
+    return warnings;
+  }
+
+  for (const [reference, refCount] of counts) {
+    await params.blobs.mutate(reference, (current) => {
+      if (!current) {
+        return undefined;
+      }
+      verifyCodexInstructionBlob(reference, current.bytes);
+      return {
+        kind: "set",
+        bytes: current.bytes,
+        metadata: { version: 1, refCount },
+      };
+    });
+  }
+  for (const entry of entries) {
+    if (!counts.has(entry.key)) {
+      await params.blobs.mutate(entry.key, (current) => (current ? { kind: "delete" } : undefined));
+    }
+  }
+  return warnings;
+}
 
 // Keep the doctor contract graph independent from the full Codex runtime.
 // The runtime parser loaded in migrateSource validates binding payloads before writes.
@@ -475,6 +662,7 @@ async function migrateSource(
   candidates: LegacyBindingOwner[],
   params: MigrationParams,
   store: PluginStateKeyedStore<MigratedBindingRow>,
+  blobs: CodexInstructionBlobReconciliationStore,
 ): Promise<SourceMigrationResult> {
   let importedKeys = 0;
   const retain = (reason: string): SourceMigrationResult => ({
@@ -500,7 +688,7 @@ async function migrateSource(
           bindingStoreKey,
           createStoredCodexAppServerBinding,
           normalizeStoredCodexAppServerBindingFingerprints,
-          readStoredCodexAppServerBinding,
+          readDoctorStoredCodexAppServerBinding,
         },
         { legacyCodexConversationBindingId },
       ] = await Promise.all([
@@ -551,15 +739,16 @@ async function migrateSource(
         key: string,
         current: MigratedBindingRow,
       ): Promise<{ value?: MigratedBindingRow; warning?: string }> => {
-        const parsed = readStoredCodexAppServerBinding(current);
+        const parsed = readDoctorStoredCodexAppServerBinding(current);
         if (!parsed) {
           return { warning: `canonical plugin state is invalid at ${key}` };
         }
-        const normalized = normalizeStoredCodexAppServerBindingFingerprints(parsed);
-        if (!normalized) {
+        const fingerprintNormalized = normalizeStoredCodexAppServerBindingFingerprints(parsed);
+        if (!fingerprintNormalized) {
           return { warning: `canonical plugin state is invalid at ${key}` };
         }
-        if (isDeepStrictEqual(parsed, normalized)) {
+        const canonical = externalizeInlineInstructions(fingerprintNormalized);
+        if (isDeepStrictEqual(parsed, canonical)) {
           return { value: parsed };
         }
         if (parsed.lease && parsed.lease.expiresAt > Date.now()) {
@@ -569,19 +758,26 @@ async function migrateSource(
         if (!update) {
           return { warning: `canonical plugin state could not be normalized at ${key}` };
         }
-        await update(key, (candidate) => {
-          const candidateParsed = readStoredCodexAppServerBinding(candidate);
-          if (!candidateParsed || !isDeepStrictEqual(candidateParsed, parsed)) {
-            return undefined;
-          }
-          return normalized;
-        });
-        const persisted = readStoredCodexAppServerBinding(await store.lookup(key));
-        if (!persisted || !isDeepStrictEqual(persisted, normalized)) {
+        const prepared = await retainInlineInstructionOwner(fingerprintNormalized, blobs);
+        try {
+          await update(key, (candidate) => {
+            const candidateParsed = readDoctorStoredCodexAppServerBinding(candidate);
+            if (!candidateParsed || !isDeepStrictEqual(candidateParsed, parsed)) {
+              return undefined;
+            }
+            return prepared.row;
+          });
+        } catch (error) {
+          await releasePreparedInstructionOwner(prepared, blobs);
+          throw error;
+        }
+        const persisted = readDoctorStoredCodexAppServerBinding(await store.lookup(key));
+        if (!persisted || !isDeepStrictEqual(persisted, prepared.row)) {
+          await releasePreparedInstructionOwner(prepared, blobs);
           return { warning: `canonical plugin state changed at ${key}` };
         }
         importedKeys++;
-        return { value: normalized };
+        return { value: prepared.row };
       };
       let currentConversation: MigratedBindingRow | undefined;
       for (const key of conversationKeys) {
@@ -595,7 +791,8 @@ async function migrateSource(
         }
         currentConversation ??= result.value;
       }
-      const stored = currentConversation ?? baseStored;
+      const storedSource = currentConversation ?? baseStored;
+      const stored = externalizeInlineInstructions(storedSource);
       const sessionKey = owner
         ? bindingStoreKey({
             kind: "session",
@@ -605,13 +802,25 @@ async function migrateSource(
           })
         : undefined;
       const conversationEntries = conversationKeys.map((key) => ({ key, value: stored }));
+      const conversationSourceEntries = conversationKeys.map((key) => ({
+        key,
+        value: storedSource,
+      }));
       const sessionEntry =
         owner && sessionKey
           ? { key: sessionKey, value: copyBindingForSession(stored, owner.sessionId) }
           : undefined;
+      const sessionSourceEntry =
+        owner && sessionKey
+          ? { key: sessionKey, value: copyBindingForSession(storedSource, owner.sessionId) }
+          : undefined;
       const entries = [...conversationEntries, ...(sessionEntry ? [sessionEntry] : [])];
+      const sourceEntries = [
+        ...conversationSourceEntries,
+        ...(sessionSourceEntry ? [sessionSourceEntry] : []),
+      ];
       const hasExpected = (value: MigratedBindingRow | undefined, target: MigratedBindingRow) => {
-        const parsed = readStoredCodexAppServerBinding(value);
+        const parsed = readDoctorStoredCodexAppServerBinding(value);
         if (!parsed) {
           return false;
         }
@@ -636,9 +845,28 @@ async function migrateSource(
           return retain(`canonical plugin state changed at ${entry.key}`);
         }
       }
-      for (const entry of entries) {
-        if (await store.registerIfAbsent(entry.key, entry.value)) {
+      for (const [index, entry] of entries.entries()) {
+        const sourceEntry = sourceEntries[index]!;
+        const current = await store.lookup(entry.key);
+        if (current !== undefined) {
+          continue;
+        }
+        const prepared = await retainInstructionOwner(sourceEntry.value, blobs);
+        if (!isDeepStrictEqual(prepared.row, entry.value)) {
+          await releasePreparedInstructionOwner(prepared, blobs);
+          return retain(`canonical instruction binding changed at ${entry.key}`);
+        }
+        let registered: boolean;
+        try {
+          registered = await store.registerIfAbsent(entry.key, prepared.row);
+        } catch (error) {
+          await releasePreparedInstructionOwner(prepared, blobs);
+          throw error;
+        }
+        if (registered) {
           importedKeys++;
+        } else {
+          await releasePreparedInstructionOwner(prepared, blobs);
         }
         if (!hasExpected(await store.lookup(entry.key), entry.value)) {
           return retain(`canonical plugin state changed at ${entry.key}`);
@@ -653,7 +881,7 @@ async function migrateSource(
               return retain(`${ownershipWarning}; its stale session binding could not be retired`);
             }
             await update(sessionEntry.key, (current) => {
-              const parsed = readStoredCodexAppServerBinding(current);
+              const parsed = readDoctorStoredCodexAppServerBinding(current);
               if (parsed?.lease && parsed.lease.expiresAt > Date.now()) {
                 return undefined;
               }
@@ -858,6 +1086,7 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
         maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
         overflowPolicy: "reject-new",
       });
+      const blobs = openInstructionBlobStore(params.context);
       let migrated = 0;
       let partialImports = 0;
       for (const source of sources) {
@@ -865,7 +1094,7 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
           ownerCollection.owners.get(
             await canonicalPathFromExistingAncestor(source.transcriptPath),
           ) ?? [];
-        const result = await migrateSource(source, candidates, params, store);
+        const result = await migrateSource(source, candidates, params, store, blobs);
         if (result.warning) {
           warnings.push(result.warning);
         }
@@ -888,11 +1117,159 @@ export const stateMigrations: PluginDoctorStateMigration[] = [
           `Migrated ${partialImports} safe Codex app-server binding row(s) to plugin state; retained legacy sidecars needing review`,
         );
       }
+      if (warnings.length === 0) {
+        const { readDoctorStoredCodexAppServerBinding } =
+          await import("../app-server/session-binding.js");
+        warnings.push(
+          ...(await reconcileInstructionBlobReferences({
+            store,
+            blobs,
+            readStored: readDoctorStoredCodexAppServerBinding,
+          })),
+        );
+      }
       return {
         changes,
         warnings,
         ...(notices.length > 0 ? { notices } : {}),
       };
+    },
+  },
+  {
+    id: "codex-app-server-inline-instructions-to-blobs",
+    label: "Codex app-server frozen workspace instructions",
+    async detectLegacyState(params) {
+      const store = params.context.openPluginStateKeyedStore<MigratedBindingRow>({
+        namespace: CODEX_APP_SERVER_BINDING_NAMESPACE,
+        maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+        overflowPolicy: "reject-new",
+      });
+      const blobs = openInstructionBlobStore(params.context);
+      const { readDoctorStoredCodexAppServerBinding } =
+        await import("../app-server/session-binding.js");
+      const counts = new Map<string, number>();
+      let inlineCount = 0;
+      let invalidCount = 0;
+      for (const { value } of await store.entries()) {
+        const stored = readDoctorStoredCodexAppServerBinding(value);
+        if (!stored) {
+          invalidCount++;
+          continue;
+        }
+        if (stored.state !== "active") {
+          continue;
+        }
+        const binding = readInstructionBindingRecord(stored.binding);
+        if (!binding) {
+          invalidCount++;
+          continue;
+        }
+        if (typeof binding.agentWorkspaceDeveloperInstructions === "string") {
+          inlineCount++;
+        }
+        const reference = binding.agentWorkspaceDeveloperInstructionsRef;
+        if (typeof reference === "string") {
+          counts.set(reference, (counts.get(reference) ?? 0) + 1);
+        }
+      }
+      let drifted = invalidCount > 0;
+      let blobEntries: Awaited<ReturnType<CodexInstructionBlobReconciliationStore["entries"]>>;
+      try {
+        blobEntries = await blobs.entries();
+      } catch {
+        return {
+          preview: [
+            "- Codex app-server bindings: inspect unreadable instruction blob metadata without cleanup",
+          ],
+        };
+      }
+      const blobKeys = new Set(blobEntries.map((entry) => entry.key));
+      for (const [reference, count] of counts) {
+        const entry = await blobs.lookup(reference);
+        if (!entry) {
+          drifted = true;
+          continue;
+        }
+        try {
+          verifyCodexInstructionBlob(reference, entry.bytes);
+          drifted ||= readCodexInstructionBlobMetadata(entry.metadata).refCount !== count;
+        } catch {
+          drifted = true;
+        }
+      }
+      drifted ||= blobEntries.some((entry) => !counts.has(entry.key));
+      drifted ||= [...counts.keys()].some((reference) => !blobKeys.has(reference));
+      return inlineCount > 0 || drifted
+        ? {
+            preview: [
+              `- Codex app-server bindings: externalize ${inlineCount} inline instruction snapshot(s) and reconcile blob references`,
+            ],
+          }
+        : null;
+    },
+    async migrateLegacyState(params) {
+      const changes: string[] = [];
+      const warnings: string[] = [];
+      const store = params.context.openPluginStateKeyedStore<MigratedBindingRow>({
+        namespace: CODEX_APP_SERVER_BINDING_NAMESPACE,
+        maxEntries: CODEX_APP_SERVER_BINDING_MAX_ENTRIES,
+        overflowPolicy: "reject-new",
+      });
+      const blobs = openInstructionBlobStore(params.context);
+      const { readDoctorStoredCodexAppServerBinding } =
+        await import("../app-server/session-binding.js");
+      const update = store.update;
+      if (!update) {
+        return {
+          changes,
+          warnings: ["Codex inline instruction bindings require atomic plugin-state updates"],
+        };
+      }
+      let migrated = 0;
+      for (const { key, value } of await store.entries()) {
+        const stored = readDoctorStoredCodexAppServerBinding(value);
+        if (!stored || stored.state !== "active") {
+          continue;
+        }
+        const binding = readInstructionBindingRecord(stored.binding);
+        const instructions = binding?.agentWorkspaceDeveloperInstructions;
+        if (typeof instructions !== "string" || !instructions.trim()) {
+          continue;
+        }
+        if (stored.lease && stored.lease.expiresAt > Date.now()) {
+          warnings.push(`Left leased Codex inline instruction binding unchanged at ${key}`);
+          continue;
+        }
+        const prepared = await retainInlineInstructionOwner(stored, blobs);
+        let updated: boolean;
+        try {
+          updated = await update(key, (candidate) =>
+            isDeepStrictEqual(candidate, stored) ? prepared.row : undefined,
+          );
+        } catch (error) {
+          await releasePreparedInstructionOwner(prepared, blobs);
+          throw error;
+        }
+        if (updated) {
+          migrated++;
+        } else {
+          await releasePreparedInstructionOwner(prepared, blobs);
+          warnings.push(`Codex inline instruction binding changed during migration at ${key}`);
+        }
+      }
+      warnings.push(
+        ...(await reconcileInstructionBlobReferences({
+          store,
+          blobs,
+          readStored: readDoctorStoredCodexAppServerBinding,
+        })),
+      );
+      if (migrated > 0) {
+        changes.push(
+          `Migrated ${migrated} Codex frozen workspace instruction snapshot(s) to plugin blobs`,
+        );
+      }
+      return { changes, warnings };
     },
   },
 ];
