@@ -1,5 +1,9 @@
 // Tests /steer target capture, prepared-path continuation, and visible fallback.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  clearActiveEmbeddedRun,
+  setActiveEmbeddedRun,
+} from "../../agents/embedded-agent-runner/runs.js";
 import type { ChatType } from "../../channels/chat-type.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { buildCommandTestParams } from "./commands.test-harness.js";
@@ -181,6 +185,30 @@ describe("handleSteerCommand", () => {
     expect(result).toEqual({ shouldContinue: true, queueModeOverride: "steer" });
     expect(params.ctx.BodyForAgent).toBe("use the active direct lane");
     expect(queueMessage).not.toHaveBeenCalled();
+  });
+
+  it("maps a text slash source lane after its active embedded owner's operation clears", async () => {
+    const sessionId = "session-direct-active";
+    const sessionKey = "agent:main:telegram:direct:123";
+    const handle = {
+      kind: "embedded" as const,
+      queueMessage: vi.fn(),
+      isStreaming: () => true,
+      isCompacting: () => false,
+      abort: vi.fn(),
+    };
+    setActiveEmbeddedRun(sessionId, handle, sessionKey);
+    try {
+      const params = buildParams("/steer use the active direct lane");
+      params.sessionKey = "agent:main:telegram:slash:123";
+
+      const result = await handleSteerCommand(params, true);
+
+      expect(result).toEqual({ shouldContinue: true, queueModeOverride: "steer" });
+      expect(params.ctx.BodyForAgent).toBe("use the active direct lane");
+    } finally {
+      clearActiveEmbeddedRun(sessionId, handle, sessionKey);
+    }
   });
 
   it("returns usage for an empty steer command", async () => {

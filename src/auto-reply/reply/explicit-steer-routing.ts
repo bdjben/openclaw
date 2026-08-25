@@ -1,4 +1,5 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { resolveActiveEmbeddedRunSessionId } from "../../agents/embedded-agent-runner/run-state.js";
 import {
   resolveInternalSessionKey,
   resolveMainSessionAlias,
@@ -84,7 +85,10 @@ export function resolveActiveExplicitSteerSessionKey(params: {
   }
   for (const candidateKey of listSteerCandidateSessionKeys(sourceSessionKey)) {
     const operation = replyRunRegistry.get(candidateKey);
-    if (operation && replyRunRegistry.resolveCurrentMessageInjectionTarget(candidateKey)) {
+    const hasActiveOwner = operation
+      ? replyRunRegistry.resolveCurrentMessageInjectionTarget(candidateKey) !== undefined
+      : resolveActiveEmbeddedRunSessionId(candidateKey) !== undefined;
+    if (hasActiveOwner) {
       return candidateKey;
     }
   }
