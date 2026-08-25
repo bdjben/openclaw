@@ -173,7 +173,13 @@ describe("Matrix active-turn steering admission", () => {
             body: "keep this run active",
           }),
         );
-        await vi.waitFor(() => expect(queuePolicyResolver).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(queuePolicyResolver).toHaveBeenCalledTimes(1), {
+          // This suite imports the full Matrix extension graph. Keep the
+          // active-turn admission assertion deterministic on saturated CI
+          // workers without weakening the behavior being asserted.
+          timeout: 10_000,
+          interval: 10,
+        });
         await activeResolverStarted.promise;
 
         followupTurn = handler(
