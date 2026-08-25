@@ -33,7 +33,6 @@ import {
   runBeforeAgentReplyForTurn,
 } from "../../plugins/before-agent-reply.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
-import { createTestUserTurnTranscriptTarget } from "../../sessions/user-turn-transcript.test-support.js";
 import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shared.js";
 import type { TemplateContext } from "../templating.js";
 import { resolveActiveExplicitSteerSessionKey } from "./explicit-steer-routing.js";
@@ -994,7 +993,19 @@ describe("runReplyAgent active steering", () => {
       storePath,
     });
     const projectedUserRows = transcript.filter(
-      (entry) => entry.message?.role === "user" && entry.message.content === followupRun.prompt,
+      (entry): entry is { message: Record<string, unknown> } => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          return false;
+        }
+        const message = (entry as { message?: unknown }).message;
+        return Boolean(
+          message &&
+          typeof message === "object" &&
+          !Array.isArray(message) &&
+          (message as { role?: unknown }).role === "user" &&
+          (message as { content?: unknown }).content === followupRun.prompt,
+        );
+      },
     );
     expect(projectedUserRows).toHaveLength(1);
     expect(projectedUserRows[0]?.message).toMatchObject({
@@ -1025,7 +1036,7 @@ describe("runReplyAgent active steering", () => {
     const commandCtx = {
       CommandAuthorized: true,
       CommandBody: "/steer finish with a table",
-      CommandSource: "text",
+      CommandSource: "text" as const,
       CommandTurn: {
         kind: "text-slash" as const,
         source: "text" as const,
