@@ -1,8 +1,14 @@
 import crypto from "node:crypto";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { resolveActiveEmbeddedRunSessionId } from "../../agents/embedded-agent-runner/run-state.js";
+import { normalizeChatType } from "../../channels/chat-type.js";
+import { resolveGroupSessionKey } from "../../config/sessions/group.js";
+import { isRestartRecoveryTombstone } from "../../config/sessions/lifecycle.js";
 import { updateSessionEntry } from "../../config/sessions/session-accessor.js";
+import { sessionEntryForkedFromParent } from "../../config/sessions/session-entry-lineage.js";
 import { isRecoverableTerminalSessionStatus } from "../../config/sessions/terminal-status.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   resolveWorkerPlacementArchiveRestoreError,
   type SessionWorkerPlacementContext,
@@ -10,7 +16,10 @@ import {
 import { logVerbose } from "../../globals.js";
 import type { SessionWorkAdmissionLease } from "../../sessions/session-lifecycle-admission.js";
 import { classifySessionStateActor } from "../../sessions/session-state-events.js";
-import { isNativeCommandTurn } from "../command-turn-context.js";
+import {
+  isNativeCommandTurn,
+  resolveCommandTurnTargetSessionKey,
+} from "../command-turn-context.js";
 import type { FinalizedMsgContext } from "../templating.js";
 import {
   createAbortAwareDispatcher,
@@ -18,6 +27,7 @@ import {
 } from "./dispatch-from-config.abort.js";
 import type { InboundMessageAuditTerminalRecorder } from "./dispatch-from-config.audit.js";
 import { shouldLetSlackRoutedThreadBypassBusyReplyOperation } from "./dispatch-from-config.context.js";
+import { loadSessionStoreEntry } from "./dispatch-from-config.runtime.js";
 import { createReplyTurnLedger } from "./dispatch-from-config.turn-ledger.js";
 import type { DispatchFromConfigParams } from "./dispatch-from-config.types.js";
 import { waitForReplyDispatcherIdle } from "./reply-dispatcher.js";
@@ -33,6 +43,7 @@ import {
   resolveReplyTurnKind,
   runWithReplyOperationLifecycleAdmission,
 } from "./reply-turn-admission.js";
+import { resolveAuthorizedSessionResetCommand } from "./session-reset-command.js";
 
 type DispatchReplyOperationAcquisition =
   | { status: "ready" }
@@ -53,6 +64,7 @@ async function restoreArchivedDispatchSession(params: {
     !sessionKey ||
     !storePath ||
     entry.archivedAt === undefined ||
+    isRestartRecoveryTombstone(entry) ||
     hasPluginOwnedBinding ||
     ctx.InboundAccessAuthorized !== true ||
     ctx.InboundEventKind === "room_event" ||
@@ -78,7 +90,8 @@ async function restoreArchivedDispatchSession(params: {
     (await updateSessionEntry({ sessionKey, storePath }, (currentEntry) => {
       if (
         currentEntry.sessionId !== snapshotSessionId ||
-        currentEntry.archivedAt !== snapshotArchivedAt
+        currentEntry.archivedAt !== snapshotArchivedAt ||
+        isRestartRecoveryTombstone(currentEntry)
       ) {
         return null;
       }
@@ -105,7 +118,81 @@ async function restoreArchivedDispatchSession(params: {
   );
 }
 
+function resolveDispatchResetAdmission(params: {
+  agentId: string;
+  cfg: OpenClawConfig;
+  ctx: FinalizedMsgContext;
+  entry?: SessionEntry;
+  hasPluginOwnedBinding: boolean;
+  sessionKey?: string;
+  storePath?: string;
+}): {
+  allowRestartTombstoneParentFork: boolean;
+  allowRestartTombstoneReset: boolean;
+  resetTriggered: boolean;
+} {
+  const { ctx, entry } = params;
+  const parentSessionKey = normalizeOptionalString(ctx.ParentSessionKey);
+  let hasParentForkSource = false;
+  if (parentSessionKey && parentSessionKey !== params.sessionKey && params.storePath) {
+    try {
+      hasParentForkSource = Boolean(
+        loadSessionStoreEntry({
+          agentId: params.agentId,
+          storePath: params.storePath,
+          sessionKey: parentSessionKey,
+          readConsistency: "latest",
+          clone: false,
+        })?.sessionId,
+      );
+    } catch {
+      hasParentForkSource = false;
+    }
+  }
+  const allowRestartTombstoneParentFork =
+    hasParentForkSource &&
+    isRestartRecoveryTombstone(entry) &&
+    !sessionEntryForkedFromParent(entry);
+  const nativeCommandTarget = isNativeCommandTurn(ctx.CommandTurn)
+    ? resolveCommandTurnTargetSessionKey(ctx)
+    : undefined;
+  if (
+    params.hasPluginOwnedBinding ||
+    entry?.pluginOwnerId !== undefined ||
+    ctx.InboundAccessAuthorized !== true ||
+    ctx.InboundEventKind === "room_event" ||
+    (nativeCommandTarget !== undefined && nativeCommandTarget !== params.sessionKey) ||
+    classifySessionStateActor({ inputProvenance: ctx.InputProvenance }).actorType !== "human"
+  ) {
+    return {
+      allowRestartTombstoneParentFork,
+      allowRestartTombstoneReset: false,
+      resetTriggered: false,
+    };
+  }
+  const normalizedChatType = normalizeChatType(ctx.ChatType);
+  const isGroup =
+    normalizedChatType != null && normalizedChatType !== "direct"
+      ? true
+      : Boolean(resolveGroupSessionKey(ctx));
+  const { resetCommand } = resolveAuthorizedSessionResetCommand({
+    agentId: params.agentId,
+    cfg: params.cfg,
+    commandAuthorized: ctx.CommandAuthorized,
+    ctx,
+    isGroup,
+  });
+  const resetTriggered = resetCommand.matchedResetTriggerLower !== undefined;
+  return {
+    resetTriggered,
+    allowRestartTombstoneParentFork,
+    allowRestartTombstoneReset: resetTriggered && isRestartRecoveryTombstone(entry),
+  };
+}
+
 export function createDispatchReplyOperationCoordinator(params: {
+  agentId: string;
+  cfg: OpenClawConfig;
   ctx: FinalizedMsgContext;
   dispatcher: ReplyDispatcher;
   dispatchOperationSessionKey?: string;
@@ -127,6 +214,9 @@ export function createDispatchReplyOperationCoordinator(params: {
   let preDispatchLifecycleAbortController: AbortController | undefined;
   let dispatchLifecycleAbortController: AbortController | undefined;
   let preDispatchLifecycleInterrupted = false;
+  let dispatchResetTriggered = false;
+  let allowRestartTombstoneParentFork = false;
+  let allowRestartTombstoneReset = false;
   const dispatchLifecycleWork = new Set<Promise<void>>();
 
   const trackDispatchLifecycleWork = (work: Promise<unknown>) => {
@@ -209,6 +299,19 @@ export function createDispatchReplyOperationCoordinator(params: {
         sessionKey: params.dispatchOperationSessionKey,
         storePath: params.operationSessionStoreEntry.storePath,
       });
+      ({
+        resetTriggered: dispatchResetTriggered,
+        allowRestartTombstoneParentFork,
+        allowRestartTombstoneReset,
+      } = resolveDispatchResetAdmission({
+        agentId: params.agentId,
+        cfg: params.cfg,
+        ctx: params.ctx,
+        entry: params.operationSessionStoreEntry.entry,
+        hasPluginOwnedBinding,
+        sessionKey: params.dispatchOperationSessionKey,
+        storePath: params.operationSessionStoreEntry.storePath,
+      }));
     }
     if (phase === "dispatch") {
       // The next full reply operation revalidates the persisted session. Drop
@@ -291,7 +394,9 @@ export function createDispatchReplyOperationCoordinator(params: {
       expectedActiveOperation: params.initialDispatchReplyOperation,
       storePath: params.operationSessionStoreEntry.storePath,
       kind: replyTurnKind,
-      resetTriggered: false,
+      resetTriggered: dispatchResetTriggered,
+      allowRestartTombstoneParentFork,
+      allowRestartTombstoneReset,
       routeThreadId: params.routeThreadId,
       originatingLeafEntryId: params.replyOptions?.turnAdoptionLifecycle?.originatingLeafEntryId,
       upstreamAbortSignal: params.replyOptions?.abortSignal,
@@ -338,7 +443,9 @@ export function createDispatchReplyOperationCoordinator(params: {
           expectedActiveOperation: params.initialDispatchReplyOperation,
           storePath: params.operationSessionStoreEntry.storePath,
           kind: replyTurnKind,
-          resetTriggered: false,
+          resetTriggered: dispatchResetTriggered,
+          allowRestartTombstoneParentFork,
+          allowRestartTombstoneReset,
           routeThreadId: params.routeThreadId,
           originatingLeafEntryId:
             params.replyOptions?.turnAdoptionLifecycle?.originatingLeafEntryId,
