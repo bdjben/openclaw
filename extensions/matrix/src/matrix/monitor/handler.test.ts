@@ -144,6 +144,7 @@ beforeEach(() => {
     };
   });
   resolveMatrixMentionsForBodyMock.mockClear();
+  sendMessageMatrixMock.mockReset().mockResolvedValue({ messageId: "evt", roomId: "!room" });
   sendTypingMatrixMock.mockReset().mockResolvedValue(undefined);
   deliverMatrixRepliesMock.mockReset().mockResolvedValue(createMockMatrixDeliveryResult());
 });
@@ -2776,6 +2777,158 @@ describe("matrix monitor handler durable inbound dedupe", () => {
       }),
     );
 
+    expect(commit).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledOnce();
+    expectRuntimeErrorContaining(runtime.error, "matrix handler failed");
+  });
+
+  it("sends one durable threaded notice and commits replay after restart tombstone rejection", async () => {
+    const callOrder: string[] = [];
+    const commit = vi.fn(async () => {
+      callOrder.push("commit");
+      return true;
+    });
+    const release = vi.fn();
+    const inboundDeduper = {
+      claim: vi.fn(async () => {
+        callOrder.push("claim");
+        return {
+          kind: "claimed" as const,
+          handle: { keys: ["test"] as const, commit, release },
+        };
+      }),
+    };
+    const runtime = { error: vi.fn() };
+    const dispatchInboundMessage = vi.fn(async () => {
+      callOrder.push("dispatch");
+      throw Object.assign(new Error("session ended during restart recovery"), {
+        code: "SESSION_RESTART_RECOVERY_TOMBSTONE",
+      });
+    });
+    sendMessageMatrixMock.mockImplementationOnce(async () => {
+      callOrder.push("notice");
+      return { messageId: "$notice", roomId: "!room:example.org" };
+    });
+    const { handler } = createMatrixHandlerTestHarness({
+      inboundDeduper,
+      runtime: runtime as never,
+      recordInboundSession: vi.fn(async () => {
+        callOrder.push("record");
+      }),
+      isDirectMessage: false,
+      roomsConfig: { "!room:example.org": { requireMention: false } },
+      client: {
+        getEvent: async () =>
+          createMatrixTextMessageEvent({
+            eventId: "$thread-root",
+            sender: "@alice:example.org",
+            body: "Thread root",
+          }),
+      },
+      dispatchInboundMessage,
+    });
+
+    await handler(
+      "!room:example.org",
+      createMatrixTextMessageEvent({
+        eventId: "$tombstone-event",
+        body: "continue",
+        relatesTo: {
+          rel_type: "m.thread",
+          event_id: "$thread-root",
+          "m.in_reply_to": { event_id: "$thread-root" },
+        },
+      }),
+    );
+
+    expect(dispatchInboundMessage).toHaveBeenCalledOnce();
+    expect(sendMessageMatrixMock).toHaveBeenCalledOnce();
+    expect(callArg(sendMessageMatrixMock, 0, 0, "notice room")).toBe("!room:example.org");
+    expect(String(callArg(sendMessageMatrixMock, 0, 1, "notice body"))).toContain(
+      "Send /new or /reset",
+    );
+    expect(callArg(sendMessageMatrixMock, 0, 2, "notice options")).toMatchObject({
+      accountId: "ops",
+      replyToId: "$thread-root",
+      threadId: "$thread-root",
+      deliveryQueueId: "matrix:restart-recovery-tombstone:ops:!room:example.org:$tombstone-event",
+      deliveryPartIndex: 0,
+      deliveryPartCount: 1,
+      extraContent: { msgtype: "m.notice" },
+    });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
+    expect(runtime.error).not.toHaveBeenCalled();
+    expect(callOrder).toEqual(["claim", "record", "dispatch", "notice", "commit"]);
+  });
+
+  it("releases replay for retry when the restart tombstone notice cannot be sent", async () => {
+    const commit = vi.fn(async () => true);
+    const release = vi.fn();
+    const inboundDeduper = {
+      claim: vi.fn(async () => ({
+        kind: "claimed" as const,
+        handle: { keys: ["test"] as const, commit, release },
+      })),
+    };
+    const runtime = { error: vi.fn() };
+    sendMessageMatrixMock.mockRejectedValueOnce(new Error("homeserver unavailable"));
+    const { handler } = createMatrixHandlerTestHarness({
+      inboundDeduper,
+      runtime: runtime as never,
+      dispatchInboundMessage: vi.fn(async () => {
+        throw Object.assign(new Error("session ended during restart recovery"), {
+          code: "SESSION_RESTART_RECOVERY_TOMBSTONE",
+        });
+      }),
+    });
+
+    await handler(
+      "!room:example.org",
+      createMatrixTextMessageEvent({
+        eventId: "$tombstone-notice-failed",
+        body: "continue",
+      }),
+    );
+
+    expect(sendMessageMatrixMock).toHaveBeenCalledOnce();
+    expect(commit).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledOnce();
+    expectRuntimeErrorContaining(
+      runtime.error,
+      "failed completing restart-recovery tombstone notice",
+    );
+  });
+
+  it("keeps non-tombstone dispatch failures on the generic retry path", async () => {
+    const commit = vi.fn(async () => true);
+    const release = vi.fn();
+    const inboundDeduper = {
+      claim: vi.fn(async () => ({
+        kind: "claimed" as const,
+        handle: { keys: ["test"] as const, commit, release },
+      })),
+    };
+    const runtime = { error: vi.fn() };
+    const { handler } = createMatrixHandlerTestHarness({
+      inboundDeduper,
+      runtime: runtime as never,
+      dispatchInboundMessage: vi.fn(async () => {
+        throw Object.assign(new Error("different lifecycle failure"), {
+          code: "SESSION_WORK_START_INVALIDATED",
+        });
+      }),
+    });
+
+    await handler(
+      "!room:example.org",
+      createMatrixTextMessageEvent({
+        eventId: "$non-tombstone-failure",
+        body: "continue",
+      }),
+    );
+
+    expect(sendMessageMatrixMock).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledOnce();
     expectRuntimeErrorContaining(runtime.error, "matrix handler failed");
