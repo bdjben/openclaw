@@ -123,6 +123,35 @@ it("returns the complete deterministic owner facet independently of pagination",
   expect(filtered.owners).toEqual(result.owners);
 });
 
+it("prepends an owner window without advancing shared-page pagination", () => {
+  const store: Record<string, SessionEntry> = {
+    "agent:main:foreign-newest": {
+      createdActor: { type: "human", id: "profile-ada" },
+      sessionId: "session-foreign-newest",
+      updatedAt: 2,
+    },
+    "agent:main:owner-older": {
+      createdActor: { type: "human", id: "profile-bob" },
+      sessionId: "session-owner-older",
+      updatedAt: 1,
+    },
+  };
+
+  const result = listSessionsFromStore({
+    cfg: {} as OpenClawConfig,
+    storePath: "/tmp/openclaw-session-owner-first",
+    store,
+    opts: { archived: "all", limit: 1 },
+    ownerFirstActorId: "profile-bob",
+  });
+
+  expect(result.sessions.map((row) => row.key)).toEqual([
+    "agent:main:owner-older",
+    "agent:main:foreign-newest",
+  ]);
+  expect(result).toMatchObject({ count: 2, totalCount: 2, nextOffset: 1, hasMore: true });
+});
+
 it("projects only durable profiles and configured agents as effective owners", () => {
   const cases = [
     { createdActor: { type: "human" as const, id: "profile-ada" }, ownerId: "profile-ada" },

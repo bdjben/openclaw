@@ -133,19 +133,6 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
   const decorateRows = (result: SessionsListResult | null): SessionsListResult | null =>
     mutations.applyConfirmedArchives(mutations.applyPendingPins(swarmActivity.decorate(result)));
 
-  const roster = createSessionRosterRefresh({
-    connection,
-    snapshot: () => gateway.snapshot,
-    readState: () => state,
-    publish,
-    observerError: () => sessionEventSubscriptionError,
-    decorate: decorateRows,
-    onCanonicalList(result) {
-      mutations.settlePrepared(result);
-      canonicalListRevision += 1;
-    },
-  });
-
   const sessionEventSubscription = createSessionEventSubscriptionOwner({
     isCurrent: (scope) => connection.isCurrent(scope),
     retryDelayMs: sessionRetryDelayMs,
@@ -165,6 +152,20 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
         // Observer outages do not replay events; one canonical list closes the gap.
         void roster.refresh({ ...roster.lastOptions(), backgroundHydrate: true, force: true });
       }
+    },
+  });
+
+  const roster = createSessionRosterRefresh({
+    connection,
+    snapshot: () => gateway.snapshot,
+    readState: () => state,
+    publish,
+    observerError: () => sessionEventSubscriptionError,
+    bootstrap: (scope, list) => sessionEventSubscription.ensure(scope, list),
+    decorate: decorateRows,
+    onCanonicalList(result) {
+      mutations.settlePrepared(result);
+      canonicalListRevision += 1;
     },
   });
 
@@ -384,13 +385,12 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
       hydratedClient = scope.client;
       hydratedSelfUserId = selfUserId;
       void (async () => {
-        await sessionEventSubscription.ensure(scope);
         if (connection.isCurrent(scope)) {
           const sessionKey = gateway.snapshot.sessionKey?.trim();
           const agentScope = sessionKey
             ? scopedAgentListParamsForSession(gateway.snapshot, sessionKey)
             : { agentId: resolveUiSelectedGlobalAgentId(gateway.snapshot) };
-          await roster.refresh({
+          await roster.bootstrap({
             ...roster.lastOptions(), // Keep visible roster filters through reconnect hydration.
             ...agentScope,
             includeDerivedTitles: true,

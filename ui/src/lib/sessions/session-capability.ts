@@ -65,6 +65,7 @@ export type SessionListOptions = {
   activeMinutes?: number;
   search?: string;
   ownerId?: string;
+  ownerFirst?: boolean;
   involvingMe?: boolean;
   offset?: number;
   limit?: number;
