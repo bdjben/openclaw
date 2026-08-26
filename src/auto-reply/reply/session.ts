@@ -15,6 +15,7 @@ import { conversationRouteContextFromMsgContext } from "../../config/sessions/co
 import { resolveGroupSessionKey } from "../../config/sessions/group.js";
 import {
   hasTerminalMainSessionTranscriptNewerThanRegistry,
+  isRestartRecoveryTombstone,
   resolveSessionLifecycleTimestamps,
   resolveSessionWorkStartError,
 } from "../../config/sessions/lifecycle.js";
@@ -49,7 +50,6 @@ import {
   recoverTerminalSessionEntryForVisibleTurn,
 } from "../../config/sessions/terminal-status.js";
 import {
-  DEFAULT_RESET_TRIGGERS,
   SESSION_TOTAL_TOKENS_VERSION,
   type GroupKeyResolution,
   type InternalSessionEntry,
@@ -109,7 +109,6 @@ import { resolveEffectiveResetTargetSessionKey } from "./acp-reset-target.js";
 import { resolveConversationBindingContextFromMessage } from "./conversation-binding-input.js";
 import { normalizeInboundTextNewlines } from "./inbound-text.js";
 import { replyRunRegistry } from "./reply-run-registry.js";
-import { isResetAuthorizedForContext } from "./reset-authorization.js";
 import { resolveRuntimePolicySessionKey } from "./runtime-policy-session-key.js";
 import {
   maybeRetireLegacyMainDeliveryRoute,
@@ -126,7 +125,7 @@ import {
 } from "./session-init-conflict-retry.js";
 import { prepareReplySessionParentFork } from "./session-parent-fork-prepare.js";
 import { clearSessionResetRuntimeState } from "./session-reset-cleanup.js";
-import { resolveSessionResetCommand } from "./session-reset-command.js";
+import { resolveAuthorizedSessionResetCommand } from "./session-reset-command.js";
 import {
   stripThreadFromSessionRoute,
   stripThreadIdFromDeliveryContext,
@@ -518,9 +517,6 @@ async function initSessionStateAttemptLocked(
   const maintenanceConfig = resolveMaintenanceConfigFromInput(sessionCfg?.maintenance);
   const mainKey = normalizeMainKey(sessionCfg?.mainKey);
   const groupResolution = resolveGroupSessionKey(sessionCtxForState) ?? undefined;
-  const resetTriggers = sessionCfg?.resetTriggers?.length
-    ? sessionCfg.resetTriggers
-    : DEFAULT_RESET_TRIGGERS;
   const sessionScope = sessionCfg?.scope ?? "per-sender";
   const ingressTimingEnabled = isDiagnosticFlagEnabled("ingress.timing", cfg);
 
@@ -538,21 +534,12 @@ async function initSessionStateAttemptLocked(
   const normalizedChatType = normalizeChatType(ctx.ChatType);
   const isGroup =
     normalizedChatType != null && normalizedChatType !== "direct" ? true : Boolean(groupResolution);
-  const commandSource = ctx.commandText ?? "";
-  const resetAuthorized = isResetAuthorizedForContext({
-    ctx,
-    cfg,
-    commandAuthorized,
-  });
-  const resetCommand = resolveSessionResetCommand({
-    commandText: commandSource,
-    rawText: ctx.rawText,
-    resetTriggers,
+  const { resetAuthorized, resetCommand } = resolveAuthorizedSessionResetCommand({
     ctx,
     cfg,
     agentId,
     isGroup,
-    resetAuthorized,
+    commandAuthorized,
   });
   const { matchedResetTriggerLower, softResetMatched, triggerBodyNormalized } = resetCommand;
   if (matchedResetTriggerLower !== undefined) {
@@ -599,7 +586,24 @@ async function initSessionStateAttemptLocked(
   });
   const entry = initializationSnapshot.currentEntry;
   const createdNewEntry = entry === undefined;
-  const archivedSessionError = resolveSessionWorkStartError(sessionKey, entry);
+  const parentSessionKey = normalizeOptionalString(ctx.ParentSessionKey);
+  const parentForkSourceEntry =
+    parentSessionKey && parentSessionKey !== sessionKey
+      ? initializationSnapshot.readEntry(parentSessionKey)
+      : undefined;
+  const restartTombstoneReset =
+    resetTriggered &&
+    isRestartRecoveryTombstone(entry) &&
+    entry?.pluginOwnerId === undefined &&
+    !isSystemEvent &&
+    classifySessionStateActor({ inputProvenance: ctx.InputProvenance }).actorType === "human";
+  const restartTombstoneParentFork =
+    Boolean(parentForkSourceEntry?.sessionId) &&
+    isRestartRecoveryTombstone(entry) &&
+    !sessionEntryForkedFromParent(entry);
+  const archivedSessionError = resolveSessionWorkStartError(sessionKey, entry, {
+    allowRestartTombstoneReplacement: restartTombstoneReset || restartTombstoneParentFork,
+  });
   if (archivedSessionError) {
     throw new Error(archivedSessionError);
   }
@@ -936,7 +940,6 @@ async function initSessionStateAttemptLocked(
   if (threadLabel) {
     sessionEntry.displayName = threadLabel;
   }
-  const parentSessionKey = normalizeOptionalString(ctx.ParentSessionKey);
   const alreadyForked = sessionEntryForkedFromParent(sessionEntry);
   if (params.signal?.aborted === true) {
     throw new Error("reply session initialization aborted");

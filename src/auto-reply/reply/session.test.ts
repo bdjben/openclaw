@@ -530,6 +530,93 @@ describe("initSessionState guarded initialization", () => {
     );
   });
 
+  it("replaces a restart tombstone only for an authorized explicit reset", async () => {
+    const storePath = await createStorePath("openclaw-session-init-restart-tombstone-");
+    const sessionKey = "agent:main:matrix:channel:room-a";
+    const successorKey = "agent:main:dashboard:successor";
+    const failedSessionId = "failed-channel-session";
+    const successorSessionId = "dashboard-successor-session";
+    const failedLifecycleRevision = "failed-generation";
+    const tombstoneEntry = {
+      sessionId: failedSessionId,
+      lifecycleRevision: failedLifecycleRevision,
+      archivedAt: Date.now() - 1_000,
+      updatedAt: Date.now(),
+      status: "failed" as const,
+      mainRestartRecovery: {
+        cycleId: "cycle-1",
+        revision: 4,
+        chargedAttempts: 3,
+        tombstone: {
+          reason: "automatic recovery exhausted",
+          recoveredSessionId: successorSessionId,
+          recoveredSessionKey: successorKey,
+        },
+      },
+    };
+    await writeSessionStoreFast(storePath, {
+      [sessionKey]: tombstoneEntry,
+    });
+    await appendTranscriptMessage(
+      { agentId: "main", sessionId: failedSessionId, sessionKey, storePath },
+      { message: { role: "user", content: "preserve the failed transcript" } },
+    );
+    const cfg = { session: { store: storePath, idleMinutes: 999 } } as OpenClawConfig;
+
+    await expect(
+      initSessionState({
+        ctx: {
+          Body: "/new",
+          RawBody: "/new",
+          CommandBody: "/new",
+          From: "@owner:example.test",
+          To: "!room-a:example.test",
+          ChatType: "channel",
+          SessionKey: sessionKey,
+          Provider: "matrix",
+          Surface: "matrix",
+        },
+        cfg,
+        commandAuthorized: false,
+      }),
+    ).rejects.toThrow(/ended during restart recovery/i);
+    expect(loadSessionEntry({ storePath, sessionKey })).toMatchObject(tombstoneEntry);
+
+    const reset = await initSessionState({
+      ctx: {
+        Body: "/new",
+        RawBody: "/new",
+        CommandBody: "/new",
+        From: "@owner:example.test",
+        To: "!room-a:example.test",
+        ChatType: "channel",
+        SessionKey: sessionKey,
+        Provider: "matrix",
+        Surface: "matrix",
+      },
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(reset.resetTriggered).toBe(true);
+    expect(reset.isNewSession).toBe(true);
+    expect(reset.sessionId).toBe(failedSessionId);
+    expect(reset.sessionEntry.lifecycleRevision).not.toBe(failedLifecycleRevision);
+    expect(reset.sessionEntry.mainRestartRecovery).toBeUndefined();
+    expect(reset.sessionEntry.archivedAt).toBeUndefined();
+    expect(reset.sessionKey).toBe(sessionKey);
+    expect(
+      JSON.stringify(
+        await loadTranscriptEvents({
+          agentId: "main",
+          sessionId: failedSessionId,
+          sessionKey,
+          storePath,
+        }),
+      ),
+    ).toContain("preserve the failed transcript");
+  });
+
   it("serializes concurrent initializers before reading the guarded snapshot", async () => {
     const storePath = await createStorePath("openclaw-session-init-race-");
     const sessionKey = "agent:main:telegram:chat:42";
@@ -701,6 +788,39 @@ describe("initSessionState thread forking", () => {
     expect(second.sessionEntry.restartRecoveryRuns).toBeUndefined();
     expect((second.sessionEntry as SessionEntry).mainRestartRecovery).toBeUndefined();
     warn.mockRestore();
+  });
+
+  it("keeps a restart tombstone terminal when its claimed parent is missing", async () => {
+    const root = await makeCaseDir("openclaw-thread-session-missing-parent-");
+    const storePath = path.join(root, "sessions.json");
+    const threadSessionKey = "agent:main:slack:channel:c1:thread:missing";
+    await writeSessionStoreFast(storePath, {
+      [threadSessionKey]: {
+        sessionId: "preseed-thread-session",
+        updatedAt: Date.now(),
+        mainRestartRecovery: {
+          cycleId: "old-cycle",
+          revision: 4,
+          chargedAttempts: 3,
+          tombstone: { reason: "old transcript exhausted" },
+        },
+      },
+    });
+
+    await expect(
+      initSessionState({
+        ctx: {
+          Body: "Thread reply",
+          SessionKey: threadSessionKey,
+          ParentSessionKey: "agent:main:slack:channel:missing-parent",
+        },
+        cfg: { session: { store: storePath } } as OpenClawConfig,
+      }),
+    ).rejects.toThrow(/ended during restart recovery/i);
+    expect(loadSessionEntry({ storePath, sessionKey: threadSessionKey })).toMatchObject({
+      sessionId: "preseed-thread-session",
+      mainRestartRecovery: { tombstone: { reason: "old transcript exhausted" } },
+    });
   });
 
   it("skips fork and creates fresh session when parent tokens exceed threshold", async () => {
@@ -3241,6 +3361,49 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
         },
       });
     }
+  });
+
+  it("rejects replacement of a restart-tombstoned model-locked session", async () => {
+    const storePath = await createStorePath("openclaw-reset-tombstone-model-locked-");
+    const sessionKey = "agent:main:telegram:dm:tombstone-model-locked";
+    const existingSessionId = "existing-tombstone-model-locked-session";
+    const existingEntry = {
+      sessionId: existingSessionId,
+      updatedAt: Date.now(),
+      archivedAt: Date.now() - 1_000,
+      agentHarnessId: "codex",
+      modelSelectionLocked: true,
+      status: "failed" as const,
+      mainRestartRecovery: {
+        cycleId: "model-locked-cycle",
+        revision: 4,
+        chargedAttempts: 3,
+        tombstone: { reason: "automatic recovery exhausted" },
+      },
+      pluginExtensions: {
+        codex: { threadId: "codex-thread-1" },
+      },
+    };
+    await writeSessionStoreFast(storePath, { [sessionKey]: existingEntry });
+
+    await expect(
+      initSessionState({
+        ctx: {
+          Body: "/new",
+          RawBody: "/new",
+          CommandBody: "/new",
+          From: "model-locked",
+          To: "bot",
+          ChatType: "direct",
+          SessionKey: sessionKey,
+          Provider: "telegram",
+          Surface: "telegram",
+        },
+        cfg: { session: { store: storePath, idleMinutes: 999 } } as OpenClawConfig,
+      }),
+    ).rejects.toThrow(MODEL_SELECTION_LOCKED_RESET_MESSAGE);
+
+    expect(loadSessionEntry({ storePath, sessionKey })).toMatchObject(existingEntry);
   });
 
   it("does not implicitly expire a model-locked session", async () => {

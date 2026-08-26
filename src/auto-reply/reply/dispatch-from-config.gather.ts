@@ -371,6 +371,8 @@ export async function gatherDispatchRequest(
   const workspaceDir =
     preparedReplyDispatchRuntime?.workspaceDir ?? resolveAgentWorkspaceDir(cfg, sessionAgentId);
   const replyOperationCoordinator = createDispatchReplyOperationCoordinator({
+    agentId: sessionAgentId,
+    cfg,
     ctx,
     dispatcher,
     dispatchOperationSessionKey,
