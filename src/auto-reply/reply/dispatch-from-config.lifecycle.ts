@@ -133,8 +133,30 @@ function resolveDispatchResetAdmission(params: {
 } {
   const { ctx, entry } = params;
   const parentSessionKey = normalizeOptionalString(ctx.ParentSessionKey);
+  const commandTarget = resolveCommandTurnTargetSessionKey(ctx);
+  const nativeCommandTarget = isNativeCommandTurn(ctx.CommandTurn) ? commandTarget : undefined;
+  const actorType = classifySessionStateActor({
+    inputProvenance: ctx.InputProvenance,
+  }).actorType;
+  const mayReplaceRestartTombstoneFromParent = canReplaceRestartTombstoneFromParent({
+    actorType,
+    entry,
+    // Parent existence is the only remaining fact. Avoid its synchronous store
+    // lookup until the already-loaded child and inbound authority require it.
+    hasParentForkSource: true,
+    hasPluginOwnedBinding: params.hasPluginOwnedBinding,
+    inboundAccessAuthorized: ctx.InboundAccessAuthorized,
+    inboundEventKind: ctx.InboundEventKind,
+    nativeCommandTarget: commandTarget,
+    sessionKey: params.sessionKey,
+  });
   let hasParentForkSource = false;
-  if (parentSessionKey && parentSessionKey !== params.sessionKey && params.storePath) {
+  if (
+    mayReplaceRestartTombstoneFromParent &&
+    parentSessionKey &&
+    parentSessionKey !== params.sessionKey &&
+    params.storePath
+  ) {
     try {
       hasParentForkSource = Boolean(
         loadSessionStoreEntry({
@@ -149,21 +171,8 @@ function resolveDispatchResetAdmission(params: {
       hasParentForkSource = false;
     }
   }
-  const commandTarget = resolveCommandTurnTargetSessionKey(ctx);
-  const nativeCommandTarget = isNativeCommandTurn(ctx.CommandTurn) ? commandTarget : undefined;
-  const actorType = classifySessionStateActor({
-    inputProvenance: ctx.InputProvenance,
-  }).actorType;
-  const allowRestartTombstoneParentFork = canReplaceRestartTombstoneFromParent({
-    actorType,
-    entry,
-    hasParentForkSource,
-    hasPluginOwnedBinding: params.hasPluginOwnedBinding,
-    inboundAccessAuthorized: ctx.InboundAccessAuthorized,
-    inboundEventKind: ctx.InboundEventKind,
-    nativeCommandTarget: commandTarget,
-    sessionKey: params.sessionKey,
-  });
+  const allowRestartTombstoneParentFork =
+    mayReplaceRestartTombstoneFromParent && hasParentForkSource;
   if (
     params.hasPluginOwnedBinding ||
     entry?.pluginOwnerId !== undefined ||

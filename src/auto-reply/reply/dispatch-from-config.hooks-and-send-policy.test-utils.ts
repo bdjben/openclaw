@@ -1864,6 +1864,42 @@ describe("sendPolicy deny — suppress delivery, not processing (#53328)", () =>
     expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
   });
 
+  it("does not add a lifecycle parent lookup for an ordinary healthy threaded turn", async () => {
+    setNoAbort();
+    sessionStoreMocks.currentEntry = {
+      sessionId: "healthy-thread-session",
+      updatedAt: Date.now(),
+    };
+    const dispatcher = createDispatcher();
+    const replyResolver = vi.fn(async () => ({ text: "thread handled" }) satisfies ReplyPayload);
+
+    const result = await dispatchReplyFromConfig({
+      ctx: buildTestCtx({
+        Provider: "slack",
+        Surface: "slack",
+        SessionKey: "agent:main:slack:channel:c1:thread:healthy",
+        ParentSessionKey: "agent:main:slack:channel:c1",
+        Body: "thread reply",
+        CommandBody: "thread reply",
+        RawBody: "thread reply",
+        InboundAccessAuthorized: true,
+        InboundEventKind: "user_request",
+        InputProvenance: { kind: "external_user", sourceChannel: "slack" },
+      }),
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver,
+    });
+
+    expect(result.queuedFinal).toBe(true);
+    const parentLookups = sessionStoreMocks.loadSessionStoreEntry.mock.calls.filter(
+      ([params]) =>
+        (params as { sessionKey?: string }).sessionKey === "agent:main:slack:channel:c1",
+    );
+    expect(parentLookups).toHaveLength(1);
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
   it("admits a human parent-fork replacement without reopening its restart tombstone", async () => {
     setNoAbort();
     const archivedAt = Date.now() - 1_000;
