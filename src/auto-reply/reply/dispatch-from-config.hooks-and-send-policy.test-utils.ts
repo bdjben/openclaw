@@ -1907,6 +1907,61 @@ describe("sendPolicy deny — suppress delivery, not processing (#53328)", () =>
     expect(dispatcher.sendFinalReply).toHaveBeenCalledWith({ text: "fork handled" });
   });
 
+  it.each([
+    {
+      label: "room event",
+      context: { InboundEventKind: "room_event" as const },
+    },
+    {
+      label: "system event",
+      context: {
+        InputProvenance: { kind: "internal_system" as const, sourceTool: "heartbeat" },
+      },
+    },
+  ])("keeps a restart tombstone terminal for a $label parent-fork turn", async ({ context }) => {
+    setNoAbort();
+    sessionStoreMocks.currentEntry = {
+      sessionId: "preseed-thread-session",
+      updatedAt: Date.now(),
+      mainRestartRecovery: {
+        cycleId: "cycle-1",
+        revision: 4,
+        chargedAttempts: 3,
+        tombstone: { reason: "automatic recovery exhausted" },
+      },
+    };
+    const dispatcher = createDispatcher();
+    const replyResolver = vi.fn(async () => ({ text: "should not run" }) satisfies ReplyPayload);
+
+    await expect(
+      dispatchReplyFromConfig({
+        ctx: buildTestCtx({
+          Provider: "slack",
+          Surface: "slack",
+          SessionKey: "agent:main:slack:channel:c1:thread:123",
+          ParentSessionKey: "agent:main:slack:channel:c1",
+          Body: "thread event",
+          CommandBody: "thread event",
+          RawBody: "thread event",
+          InboundAccessAuthorized: true,
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: "slack" },
+          ...context,
+        }),
+        cfg: emptyConfig,
+        dispatcher,
+        replyResolver,
+      }),
+    ).rejects.toThrow(/ended during restart recovery/i);
+
+    expect(sessionStoreMocks.currentEntry).toMatchObject({
+      sessionId: "preseed-thread-session",
+      mainRestartRecovery: { tombstone: { reason: "automatic recovery exhausted" } },
+    });
+    expect(replyResolver).not.toHaveBeenCalled();
+    expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
+  });
+
   it("admits an authorized hard reset without pre-unarchiving the restart tombstone", async () => {
     setNoAbort();
     const sessionId = "restart-tombstone-session";

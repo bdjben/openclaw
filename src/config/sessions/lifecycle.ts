@@ -66,18 +66,6 @@ export class SessionRestartRecoveryTombstoneError extends Error {
   }
 }
 
-export function isSessionRestartRecoveryTombstoneError(
-  error: unknown,
-): error is SessionRestartRecoveryTombstoneError {
-  return (
-    error instanceof SessionRestartRecoveryTombstoneError ||
-    (typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === SESSION_RESTART_RECOVERY_TOMBSTONE_ERROR_CODE)
-  );
-}
-
 /** Lifecycle-owned initializing, restart-tombstoned, and archived sessions reject new work. */
 export function resolveSessionWorkStartError(
   sessionKey: string,

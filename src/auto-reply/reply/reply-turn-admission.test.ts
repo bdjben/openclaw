@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import { isSessionRestartRecoveryTombstoneError } from "../../config/sessions/lifecycle.js";
+import { SESSION_RESTART_RECOVERY_TOMBSTONE_ERROR_CODE } from "../../config/sessions/lifecycle.js";
 import * as sessionAccessor from "../../config/sessions/session-accessor.js";
 import {
   deleteSessionEntryLifecycle,
@@ -670,8 +670,8 @@ describe("reply turn admission", () => {
         kind,
       }).catch((error: unknown) => error);
 
-      expect(isSessionRestartRecoveryTombstoneError(rejection)).toBe(true);
       expect(rejection).toBeInstanceOf(Error);
+      expect(rejection).toMatchObject({ code: SESSION_RESTART_RECOVERY_TOMBSTONE_ERROR_CODE });
       expect((rejection as Error).message).toMatch(/ended during restart recovery/i);
     },
   );

@@ -124,7 +124,10 @@ import {
   ReplySessionInitConflictError,
   runWithSessionInitConflictRetry,
 } from "./session-init-conflict-retry.js";
-import { prepareReplySessionParentFork } from "./session-parent-fork-prepare.js";
+import {
+  canReplaceRestartTombstoneFromParent,
+  prepareReplySessionParentFork,
+} from "./session-parent-fork-prepare.js";
 import { clearSessionResetRuntimeState } from "./session-reset-cleanup.js";
 import { resolveAuthorizedSessionResetCommand } from "./session-reset-command.js";
 import {
@@ -600,10 +603,17 @@ async function initSessionStateAttemptLocked(
     entry?.pluginOwnerId === undefined &&
     !isSystemEvent &&
     classifySessionStateActor({ inputProvenance: ctx.InputProvenance }).actorType === "human";
-  const restartTombstoneParentFork =
-    Boolean(parentForkSourceEntry?.sessionId) &&
-    isRestartRecoveryTombstone(entry) &&
-    !sessionEntryForkedFromParent(entry);
+  const restartTombstoneParentFork = canReplaceRestartTombstoneFromParent({
+    actorType: isSystemEvent
+      ? "system"
+      : classifySessionStateActor({ inputProvenance: ctx.InputProvenance }).actorType,
+    entry,
+    hasParentForkSource: Boolean(parentForkSourceEntry?.sessionId),
+    inboundAccessAuthorized: ctx.InboundAccessAuthorized,
+    inboundEventKind: ctx.InboundEventKind,
+    nativeCommandTarget: resolveCommandTurnTargetSessionKey(ctx),
+    sessionKey,
+  });
   const archivedSessionError = resolveSessionWorkStartError(sessionKey, entry, {
     allowRestartTombstoneReplacement: restartTombstoneReset || restartTombstoneParentFork,
   });

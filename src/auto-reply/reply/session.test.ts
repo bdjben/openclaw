@@ -756,6 +756,9 @@ describe("initSessionState thread forking", () => {
         Body: "Thread reply",
         SessionKey: threadSessionKey,
         ParentSessionKey: parentSessionKey,
+        InboundAccessAuthorized: true,
+        InboundEventKind: "user_request",
+        InputProvenance: { kind: "external_user", sourceChannel: "slack" },
       },
       cfg,
     });
@@ -813,12 +816,53 @@ describe("initSessionState thread forking", () => {
           Body: "Thread reply",
           SessionKey: threadSessionKey,
           ParentSessionKey: "agent:main:slack:channel:missing-parent",
+          InboundAccessAuthorized: true,
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: "slack" },
         },
         cfg: { session: { store: storePath } } as OpenClawConfig,
       }),
     ).rejects.toThrow(/ended during restart recovery/i);
     expect(loadSessionEntry({ storePath, sessionKey: threadSessionKey })).toMatchObject({
       sessionId: "preseed-thread-session",
+      mainRestartRecovery: { tombstone: { reason: "old transcript exhausted" } },
+    });
+  });
+
+  it("keeps a restart tombstone terminal for an unauthorized parent-fork turn", async () => {
+    const root = await makeCaseDir("openclaw-thread-session-unauthorized-parent-");
+    const storePath = path.join(root, "sessions.json");
+    const parentSessionKey = "agent:main:slack:channel:c1";
+    const threadSessionKey = "agent:main:slack:channel:c1:thread:unauthorized";
+    await writeSessionStoreFast(storePath, {
+      [parentSessionKey]: { sessionId: "parent-session", updatedAt: Date.now() },
+      [threadSessionKey]: {
+        sessionId: "tombstoned-thread-session",
+        updatedAt: Date.now(),
+        mainRestartRecovery: {
+          cycleId: "old-cycle",
+          revision: 4,
+          chargedAttempts: 3,
+          tombstone: { reason: "old transcript exhausted" },
+        },
+      },
+    });
+
+    await expect(
+      initSessionState({
+        ctx: {
+          Body: "Thread reply",
+          SessionKey: threadSessionKey,
+          ParentSessionKey: parentSessionKey,
+          InboundAccessAuthorized: false,
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: "slack" },
+        },
+        cfg: { session: { store: storePath } } as OpenClawConfig,
+      }),
+    ).rejects.toThrow(/ended during restart recovery/i);
+    expect(loadSessionEntry({ storePath, sessionKey: threadSessionKey })).toMatchObject({
+      sessionId: "tombstoned-thread-session",
       mainRestartRecovery: { tombstone: { reason: "old transcript exhausted" } },
     });
   });
@@ -860,6 +904,9 @@ describe("initSessionState thread forking", () => {
         Body: "Thread reply",
         SessionKey: threadSessionKey,
         ParentSessionKey: parentSessionKey,
+        InboundAccessAuthorized: true,
+        InboundEventKind: "user_request",
+        InputProvenance: { kind: "external_user", sourceChannel: "slack" },
       },
       cfg,
     });
@@ -906,6 +953,9 @@ describe("initSessionState thread forking", () => {
           Body: "Thread reply",
           SessionKey: threadSessionKey,
           ParentSessionKey: parentSessionKey,
+          InboundAccessAuthorized: true,
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: "slack" },
         },
         cfg: { session: { store: storePath } } as OpenClawConfig,
       }),

@@ -5,7 +5,6 @@ import { normalizeChatType } from "../../channels/chat-type.js";
 import { resolveGroupSessionKey } from "../../config/sessions/group.js";
 import { isRestartRecoveryTombstone } from "../../config/sessions/lifecycle.js";
 import { updateSessionEntry } from "../../config/sessions/session-accessor.js";
-import { sessionEntryForkedFromParent } from "../../config/sessions/session-entry-lineage.js";
 import { isRecoverableTerminalSessionStatus } from "../../config/sessions/terminal-status.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -43,6 +42,7 @@ import {
   resolveReplyTurnKind,
   runWithReplyOperationLifecycleAdmission,
 } from "./reply-turn-admission.js";
+import { canReplaceRestartTombstoneFromParent } from "./session-parent-fork-prepare.js";
 import { resolveAuthorizedSessionResetCommand } from "./session-reset-command.js";
 
 type DispatchReplyOperationAcquisition =
@@ -149,20 +149,28 @@ function resolveDispatchResetAdmission(params: {
       hasParentForkSource = false;
     }
   }
-  const allowRestartTombstoneParentFork =
-    hasParentForkSource &&
-    isRestartRecoveryTombstone(entry) &&
-    !sessionEntryForkedFromParent(entry);
-  const nativeCommandTarget = isNativeCommandTurn(ctx.CommandTurn)
-    ? resolveCommandTurnTargetSessionKey(ctx)
-    : undefined;
+  const commandTarget = resolveCommandTurnTargetSessionKey(ctx);
+  const nativeCommandTarget = isNativeCommandTurn(ctx.CommandTurn) ? commandTarget : undefined;
+  const actorType = classifySessionStateActor({
+    inputProvenance: ctx.InputProvenance,
+  }).actorType;
+  const allowRestartTombstoneParentFork = canReplaceRestartTombstoneFromParent({
+    actorType,
+    entry,
+    hasParentForkSource,
+    hasPluginOwnedBinding: params.hasPluginOwnedBinding,
+    inboundAccessAuthorized: ctx.InboundAccessAuthorized,
+    inboundEventKind: ctx.InboundEventKind,
+    nativeCommandTarget: commandTarget,
+    sessionKey: params.sessionKey,
+  });
   if (
     params.hasPluginOwnedBinding ||
     entry?.pluginOwnerId !== undefined ||
     ctx.InboundAccessAuthorized !== true ||
     ctx.InboundEventKind === "room_event" ||
     (nativeCommandTarget !== undefined && nativeCommandTarget !== params.sessionKey) ||
-    classifySessionStateActor({ inputProvenance: ctx.InputProvenance }).actorType !== "human"
+    actorType !== "human"
   ) {
     return {
       allowRestartTombstoneParentFork,

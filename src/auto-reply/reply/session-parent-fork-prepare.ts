@@ -1,8 +1,41 @@
 // Prepares parent-context fork metadata for guarded reply session initialization.
 import { buildMainSessionRecoveryClearPatch } from "../../agents/main-session-recovery/main-session-recovery-clear.js";
 import type { InternalSessionEntry, SessionEntry } from "../../config/sessions.js";
-import { SessionRestartRecoveryTombstoneError } from "../../config/sessions/lifecycle.js";
+import {
+  isRestartRecoveryTombstone,
+  SessionRestartRecoveryTombstoneError,
+} from "../../config/sessions/lifecycle.js";
+import { sessionEntryForkedFromParent } from "../../config/sessions/session-entry-lineage.js";
 import { forkSessionFromParent, resolveParentForkDecision } from "./session-fork.js";
+
+export function canReplaceRestartTombstoneFromParent(params: {
+  actorType: "agent" | "human" | "system";
+  entry?: SessionEntry;
+  hasParentForkSource: boolean;
+  hasPluginOwnedBinding?: boolean;
+  inboundAccessAuthorized?: boolean;
+  inboundEventKind?: string;
+  nativeCommandTarget?: string;
+  sessionKey?: string;
+}): boolean {
+  return (
+    params.hasParentForkSource &&
+    isRestartRecoveryTombstone(params.entry) &&
+    !sessionEntryForkedFromParent(params.entry) &&
+    params.hasPluginOwnedBinding !== true &&
+    params.entry?.pluginOwnerId === undefined &&
+    params.inboundAccessAuthorized === true &&
+    params.inboundEventKind !== "room_event" &&
+    params.actorType === "human" &&
+    (params.nativeCommandTarget === undefined || params.nativeCommandTarget === params.sessionKey)
+  );
+}
+
+function restartTombstoneParentReplacementError(sessionKey: string): Error {
+  return new SessionRestartRecoveryTombstoneError(
+    `Session "${sessionKey}" ended during restart recovery. Use /new or /reset to start a replacement session.`,
+  );
+}
 
 export async function prepareReplySessionParentFork(params: {
   agentId: string;
@@ -24,6 +57,9 @@ export async function prepareReplySessionParentFork(params: {
   }
   const parentEntry = params.readEntry(params.parentSessionKey);
   if (!parentEntry?.sessionId) {
+    if (params.requireParentForkReplacement === true) {
+      throw restartTombstoneParentReplacementError(params.sessionKey);
+    }
     return params.sessionEntry;
   }
   const decision = await resolveParentForkDecision({
@@ -49,9 +85,7 @@ export async function prepareReplySessionParentFork(params: {
   });
   if (!fork) {
     if (params.requireParentForkReplacement === true) {
-      throw new SessionRestartRecoveryTombstoneError(
-        `Session "${params.sessionKey}" ended during restart recovery. Use /new or /reset to start a replacement session.`,
-      );
+      throw restartTombstoneParentReplacementError(params.sessionKey);
     }
     return params.sessionEntry;
   }
