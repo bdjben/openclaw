@@ -7,6 +7,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { testing as sessionMcpTesting } from "../../agents/agent-bundle-mcp-runtime.js";
 import { getOrCreateSessionMcpRuntime } from "../../agents/agent-bundle-mcp-tools.js";
 import * as bootstrapCache from "../../agents/bootstrap-cache.js";
+import {
+  clearEmbeddedSessionPromptStates,
+  getEmbeddedSessionPromptState,
+} from "../../agents/embedded-agent-runner/session-prompt-state.js";
 import { buildChannelInboundEventContext } from "../../channels/inbound-event/context.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions.js";
@@ -53,7 +57,9 @@ import {
 import { withEnvAsync } from "../../test-utils/env.js";
 import { createSessionConversationTestRegistry } from "../../test-utils/session-conversation-registry.js";
 import { finalizeInboundContext } from "./inbound-context.js";
-import { replyRunRegistry } from "./reply-run-registry.js";
+import { clearSessionQueues, enqueueFollowupRun, getFollowupQueueDepth } from "./queue.js";
+import { createQueueTestRun } from "./queue.test-helpers.js";
+import { createReplyOperation, replyRunRegistry } from "./reply-run-registry.js";
 import { drainFormattedSystemEvents } from "./session-system-events.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
 import { resolveReplySessionPreprocessingState } from "./session.js";
@@ -617,6 +623,60 @@ describe("initSessionState guarded initialization", () => {
     ).toContain("preserve the failed transcript");
   });
 
+  it("reports a committed reset as successful when reply cancellation throws", async () => {
+    const storePath = await createStorePath("openclaw-session-init-reset-cancel-failure-");
+    const sessionKey = "agent:main:matrix:channel:cancel-failure";
+    const sessionId = "committed-reset-session";
+    await writeSessionStoreFast(storePath, {
+      [sessionKey]: {
+        sessionId,
+        updatedAt: Date.now(),
+        mainRestartRecovery: {
+          cycleId: "cycle-1",
+          revision: 4,
+          chargedAttempts: 3,
+          tombstone: { reason: "automatic recovery exhausted" },
+        },
+      },
+    });
+    const cancel = vi.fn(() => {
+      throw new Error("backend cancellation failed");
+    });
+    const activeReply = createReplyOperation({
+      sessionKey,
+      sessionId,
+      resetTriggered: false,
+    });
+    activeReply.attachBackend({ kind: "embedded", cancel, isStreaming: () => false });
+    activeReply.setPhase("running");
+
+    try {
+      const reset = await initSessionState({
+        ctx: {
+          Body: "/new",
+          RawBody: "/new",
+          CommandBody: "/new",
+          From: "@owner:example.test",
+          To: "!cancel-failure:example.test",
+          ChatType: "channel",
+          SessionKey: sessionKey,
+          Provider: "matrix",
+          Surface: "matrix",
+        },
+        cfg: { session: { store: storePath, idleMinutes: 999 } } as OpenClawConfig,
+        commandAuthorized: true,
+      });
+
+      expect(reset.resetTriggered).toBe(true);
+      expect(reset.sessionEntry.mainRestartRecovery).toBeUndefined();
+      expect(loadSessionEntry({ storePath, sessionKey })?.mainRestartRecovery).toBeUndefined();
+      expect(cancel).toHaveBeenCalledWith("restart");
+      expect(replyRunRegistry.isActive(sessionKey)).toBe(false);
+    } finally {
+      activeReply.complete();
+    }
+  });
+
   it("serializes concurrent initializers before reading the guarded snapshot", async () => {
     const storePath = await createStorePath("openclaw-session-init-race-");
     const sessionKey = "agent:main:telegram:chat:42";
@@ -946,24 +1006,55 @@ describe("initSessionState thread forking", () => {
       },
     });
     sessionForkMocks.forkSessionFromParent.mockResolvedValueOnce(undefined);
-
-    await expect(
-      initSessionState({
-        ctx: {
-          Body: "Thread reply",
-          SessionKey: threadSessionKey,
-          ParentSessionKey: parentSessionKey,
-          InboundAccessAuthorized: true,
-          InboundEventKind: "user_request",
-          InputProvenance: { kind: "external_user", sourceChannel: "slack" },
-        },
-        cfg: { session: { store: storePath } } as OpenClawConfig,
-      }),
-    ).rejects.toThrow(/ended during restart recovery/i);
-    expect(loadSessionEntry({ storePath, sessionKey: threadSessionKey })).toMatchObject({
+    const promptState = getEmbeddedSessionPromptState(threadSessionKey);
+    promptState.sentUserTurnIds.add("retained-turn");
+    enqueueFollowupRun(
+      threadSessionKey,
+      createQueueTestRun({ prompt: "retained followup" }),
+      { mode: "followup" },
+      "none",
+      undefined,
+      false,
+    );
+    enqueueSystemEvent("retained event", { sessionKey: threadSessionKey });
+    const cancel = vi.fn();
+    const activeReply = createReplyOperation({
+      sessionKey: threadSessionKey,
       sessionId: "tombstoned-thread-session",
-      mainRestartRecovery: { tombstone: { reason: "old transcript exhausted" } },
+      resetTriggered: false,
     });
+    activeReply.attachBackend({ kind: "embedded", cancel, isStreaming: () => false });
+    activeReply.setPhase("running");
+
+    try {
+      await expect(
+        initSessionState({
+          ctx: {
+            Body: "Thread reply",
+            SessionKey: threadSessionKey,
+            ParentSessionKey: parentSessionKey,
+            InboundAccessAuthorized: true,
+            InboundEventKind: "user_request",
+            InputProvenance: { kind: "external_user", sourceChannel: "slack" },
+          },
+          cfg: { session: { store: storePath } } as OpenClawConfig,
+        }),
+      ).rejects.toThrow(/ended during restart recovery/i);
+      expect(loadSessionEntry({ storePath, sessionKey: threadSessionKey })).toMatchObject({
+        sessionId: "tombstoned-thread-session",
+        mainRestartRecovery: { tombstone: { reason: "old transcript exhausted" } },
+      });
+      expect(getEmbeddedSessionPromptState(threadSessionKey)).toBe(promptState);
+      expect(promptState.sentUserTurnIds).toContain("retained-turn");
+      expect(getFollowupQueueDepth(threadSessionKey)).toBe(1);
+      expect(peekSystemEvents(threadSessionKey)).toEqual(["retained event"]);
+      expect(replyRunRegistry.get(threadSessionKey)).toBe(activeReply);
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      clearEmbeddedSessionPromptStates([threadSessionKey]);
+      clearSessionQueues([threadSessionKey]);
+      activeReply.complete();
+    }
   });
 
   it("skips fork when resolved parent token estimate exceeds threshold", async () => {

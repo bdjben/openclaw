@@ -768,13 +768,6 @@ async function initSessionStateAttemptLocked(
       sessionKey,
     };
   }
-  if (previousSessionEntry) {
-    clearSessionResetRuntimeState([sessionKey, previousSessionEntry.sessionId], {
-      activeReplySessionId: previousSessionEntry.sessionId,
-      agentId,
-    });
-  }
-
   const recoveredTerminalEntry =
     entry && recoverTerminalVisibleEntry
       ? recoverTerminalSessionEntryForVisibleTurn(entry)
@@ -1062,6 +1055,18 @@ async function initSessionStateAttemptLocked(
     // Propagate a typed conflict so initSessionState can retry with backoff
     // outside the store writer lane instead of surfacing this to the caller.
     throw new ReplySessionInitConflictError(sessionKey);
+  }
+  if (previousSessionEntry) {
+    try {
+      clearSessionResetRuntimeState([sessionKey, previousSessionEntry.sessionId], {
+        activeReplySessionId: previousSessionEntry.sessionId,
+        agentId,
+      });
+    } catch (error) {
+      // The replacement is already durable. Runtime cleanup is best-effort and
+      // must not turn a committed reset into a reported initialization failure.
+      log.warn(`failed to clear reset runtime state for session ${sessionKey}: ${String(error)}`);
+    }
   }
   sessionEntry = committed.sessionEntry;
   sessionId = sessionEntry.sessionId;
