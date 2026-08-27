@@ -48,6 +48,12 @@ describe("prepareReplySessionParentFork", () => {
 
     expect(canReplaceRestartTombstoneFromParent(allowed)).toBe(true);
     expect(
+      canReplaceRestartTombstoneFromParent({
+        ...allowed,
+        entry: { ...entry, modelSelectionLocked: true },
+      }),
+    ).toBe(false);
+    expect(
       canReplaceRestartTombstoneFromParent({ ...allowed, inboundAccessAuthorized: false }),
     ).toBe(false);
     expect(

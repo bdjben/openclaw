@@ -927,6 +927,53 @@ describe("initSessionState thread forking", () => {
     });
   });
 
+  it("keeps a model-locked restart tombstone terminal for a parent-fork turn", async () => {
+    const root = await makeCaseDir("openclaw-thread-session-model-locked-parent-");
+    const storePath = path.join(root, "sessions.json");
+    const parentSessionKey = "agent:main:slack:channel:c1";
+    const threadSessionKey = "agent:main:slack:channel:c1:thread:model-locked";
+    const existingEntry = {
+      sessionId: "model-locked-thread-session",
+      updatedAt: Date.now(),
+      agentHarnessId: "codex",
+      modelSelectionLocked: true,
+      pluginExtensions: {
+        codex: { threadId: "codex-thread-1" },
+      },
+      mainRestartRecovery: {
+        cycleId: "old-cycle",
+        revision: 4,
+        chargedAttempts: 3,
+        tombstone: { reason: "old transcript exhausted" },
+      },
+    };
+    await writeSessionStoreFast(storePath, {
+      [parentSessionKey]: { sessionId: "parent-session", updatedAt: Date.now() },
+      [threadSessionKey]: existingEntry,
+    });
+
+    await expect(
+      initSessionState({
+        ctx: {
+          Body: "Thread reply",
+          SessionKey: threadSessionKey,
+          ParentSessionKey: parentSessionKey,
+          InboundAccessAuthorized: true,
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: "slack" },
+        },
+        cfg: { session: { store: storePath } } as OpenClawConfig,
+      }),
+    ).rejects.toThrow(
+      /cannot be replaced while model selection is locked.*WebChat.*Resume in new session/i,
+    );
+
+    expect(loadSessionEntry({ storePath, sessionKey: threadSessionKey })).toMatchObject(
+      existingEntry,
+    );
+    expect(sessionForkMocks.forkSessionFromParent).not.toHaveBeenCalled();
+  });
+
   it("skips fork and creates fresh session when parent tokens exceed threshold", async () => {
     const root = await makeCaseDir("openclaw-thread-session-overflow-");
     const parentSessionId = "parent-overflow";

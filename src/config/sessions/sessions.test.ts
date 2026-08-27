@@ -473,6 +473,12 @@ describe("session work admission", () => {
       "ended during restart recovery",
     );
     expect(
+      resolveSessionWorkStartError("agent:main:matrix:channel:room-a", {
+        ...entry,
+        modelSelectionLocked: true,
+      }),
+    ).toContain("Open it in WebChat and use Resume in new session");
+    expect(
       resolveSessionWorkStartError("agent:main:matrix:channel:room-a", entry, {
         allowRestartTombstoneReplacement: true,
       }),

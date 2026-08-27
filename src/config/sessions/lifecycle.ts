@@ -17,7 +17,11 @@ type SessionLifecycleEntry = Pick<
 
 type SessionWorkStartEntry = Pick<
   InternalSessionEntry,
-  "archivedAt" | "initializationPending" | "mainRestartRecovery" | "sessionId"
+  | "archivedAt"
+  | "initializationPending"
+  | "mainRestartRecovery"
+  | "modelSelectionLocked"
+  | "sessionId"
 >;
 
 type SessionWorkStartOptions = {
@@ -83,8 +87,11 @@ export function resolveSessionWorkStartError(
   }
   const restartRecoveryTombstone = isRestartRecoveryTombstone(entry);
   if (restartRecoveryTombstone) {
-    return options?.allowRestartTombstoneReplacement === true
-      ? undefined
+    if (options?.allowRestartTombstoneReplacement === true) {
+      return undefined;
+    }
+    return entry?.modelSelectionLocked === true
+      ? `Session "${sessionKey}" ended during restart recovery and cannot be replaced while model selection is locked. Open it in WebChat and use Resume in new session.`
       : `Session "${sessionKey}" ended during restart recovery. Use /new or /reset to start a replacement session.`;
   }
   return entry?.archivedAt === undefined

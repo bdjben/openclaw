@@ -6,6 +6,7 @@ import {
   SessionRestartRecoveryTombstoneError,
 } from "../../config/sessions/lifecycle.js";
 import { sessionEntryForkedFromParent } from "../../config/sessions/session-entry-lineage.js";
+import { isModelSelectionLocked } from "../../sessions/model-overrides.js";
 import { forkSessionFromParent, resolveParentForkDecision } from "./session-fork.js";
 
 export function canReplaceRestartTombstoneFromParent(params: {
@@ -21,6 +22,7 @@ export function canReplaceRestartTombstoneFromParent(params: {
   return (
     params.hasParentForkSource &&
     isRestartRecoveryTombstone(params.entry) &&
+    !isModelSelectionLocked(params.entry) &&
     !sessionEntryForkedFromParent(params.entry) &&
     params.hasPluginOwnedBinding !== true &&
     params.entry?.pluginOwnerId === undefined &&
