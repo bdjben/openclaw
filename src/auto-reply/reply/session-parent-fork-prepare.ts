@@ -1,12 +1,14 @@
 // Prepares parent-context fork metadata for guarded reply session initialization.
 import { buildMainSessionRecoveryClearPatch } from "../../agents/main-session-recovery/main-session-recovery-clear.js";
 import type { InternalSessionEntry, SessionEntry } from "../../config/sessions.js";
+import { SessionRestartRecoveryTombstoneError } from "../../config/sessions/lifecycle.js";
 import { forkSessionFromParent, resolveParentForkDecision } from "./session-fork.js";
 
 export async function prepareReplySessionParentFork(params: {
   agentId: string;
   alreadyForked: boolean;
   parentSessionKey?: string;
+  requireParentForkReplacement?: boolean;
   readEntry: (sessionKey: string) => SessionEntry | undefined;
   sessionEntry: SessionEntry;
   sessionKey: string;
@@ -46,6 +48,11 @@ export async function prepareReplySessionParentFork(params: {
     storePath: params.storePath,
   });
   if (!fork) {
+    if (params.requireParentForkReplacement === true) {
+      throw new SessionRestartRecoveryTombstoneError(
+        `Session "${params.sessionKey}" ended during restart recovery. Use /new or /reset to start a replacement session.`,
+      );
+    }
     return params.sessionEntry;
   }
   params.warn(

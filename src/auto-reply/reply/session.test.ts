@@ -830,6 +830,7 @@ describe("initSessionState thread forking", () => {
 
     const storePath = path.join(root, "sessions.json");
     const parentSessionKey = "agent:main:slack:channel:c1";
+    const threadSessionKey = "agent:main:slack:channel:c1:thread:456";
     // Set totalTokens well above PARENT_FORK_MAX_TOKENS (100_000)
     await writeSessionStoreFast(storePath, {
       [parentSessionKey]: {
@@ -838,13 +839,22 @@ describe("initSessionState thread forking", () => {
         updatedAt: Date.now(),
         totalTokens: 170_000,
       },
+      [threadSessionKey]: {
+        sessionId: "tombstoned-thread-session",
+        updatedAt: Date.now(),
+        mainRestartRecovery: {
+          cycleId: "old-cycle",
+          revision: 4,
+          chargedAttempts: 3,
+          tombstone: { reason: "old transcript exhausted" },
+        },
+      },
     });
 
     const cfg = {
       session: { store: storePath },
     } as OpenClawConfig;
 
-    const threadSessionKey = "agent:main:slack:channel:c1:thread:456";
     const result = await initSessionState({
       ctx: {
         Body: "Thread reply",
@@ -859,10 +869,51 @@ describe("initSessionState thread forking", () => {
     expect(result.sessionEntry.forkSource).toBeUndefined();
     // Session ID should NOT match the parent — it should be a fresh UUID
     expect(result.sessionEntry.sessionId).not.toBe(parentSessionId);
+    expect(result.sessionEntry.sessionId).not.toBe("tombstoned-thread-session");
+    expect((result.sessionEntry as SessionEntry).mainRestartRecovery).toBeUndefined();
     // Session file should NOT be the parent's file (it was not forked)
     expect(result.sessionEntry.sessionFile).not.toBe(parentSessionFile);
     expect(result.sessionEntry.totalTokens).toBe(0);
     expect(result.sessionEntry.totalTokensFresh).toBe(true);
+  });
+
+  it("keeps a restart tombstone terminal when its parent fork fails", async () => {
+    const root = await makeCaseDir("openclaw-thread-session-fork-failure-");
+    const storePath = path.join(root, "sessions.json");
+    const parentSessionKey = "agent:main:slack:channel:c1";
+    const threadSessionKey = "agent:main:slack:channel:c1:thread:failed";
+    await writeSessionStoreFast(storePath, {
+      [parentSessionKey]: {
+        sessionId: "parent-session",
+        updatedAt: Date.now(),
+      },
+      [threadSessionKey]: {
+        sessionId: "tombstoned-thread-session",
+        updatedAt: Date.now(),
+        mainRestartRecovery: {
+          cycleId: "old-cycle",
+          revision: 4,
+          chargedAttempts: 3,
+          tombstone: { reason: "old transcript exhausted" },
+        },
+      },
+    });
+    sessionForkMocks.forkSessionFromParent.mockResolvedValueOnce(undefined);
+
+    await expect(
+      initSessionState({
+        ctx: {
+          Body: "Thread reply",
+          SessionKey: threadSessionKey,
+          ParentSessionKey: parentSessionKey,
+        },
+        cfg: { session: { store: storePath } } as OpenClawConfig,
+      }),
+    ).rejects.toThrow(/ended during restart recovery/i);
+    expect(loadSessionEntry({ storePath, sessionKey: threadSessionKey })).toMatchObject({
+      sessionId: "tombstoned-thread-session",
+      mainRestartRecovery: { tombstone: { reason: "old transcript exhausted" } },
+    });
   });
 
   it("skips fork when resolved parent token estimate exceeds threshold", async () => {

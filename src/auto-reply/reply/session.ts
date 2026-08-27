@@ -712,14 +712,15 @@ async function initSessionStateAttemptLocked(
     (entryFreshness?.fresh ?? false) &&
     isRecoverableTerminalSessionStatus(entry?.status);
   const freshEntry =
-    (lockedModelSelection && canReuseExistingEntry) ||
-    (isSystemEvent && canReuseExistingEntry) ||
-    (((pinExpectedExistingSession && canReuseExistingEntry) ||
-      (reconnectResumeRequested && canReuseExistingEntry) ||
-      recoverTerminalVisibleEntry ||
-      (entryFreshness?.fresh ?? false) ||
-      (softResetAllowed && canReuseExistingEntry)) &&
-      !terminalMainTranscriptNewerThanRegistry);
+    !restartTombstoneParentFork &&
+    ((lockedModelSelection && canReuseExistingEntry) ||
+      (isSystemEvent && canReuseExistingEntry) ||
+      (((pinExpectedExistingSession && canReuseExistingEntry) ||
+        (reconnectResumeRequested && canReuseExistingEntry) ||
+        recoverTerminalVisibleEntry ||
+        (entryFreshness?.fresh ?? false) ||
+        (softResetAllowed && canReuseExistingEntry)) &&
+        !terminalMainTranscriptNewerThanRegistry));
   const activeReplyOperation = replyRunRegistry.get(sessionKey);
   const deferImplicitRolloverForActiveRun =
     !resetTriggered &&
@@ -778,9 +779,10 @@ async function initSessionStateAttemptLocked(
   } else {
     // Durable resets retain their transcript identity for cursor continuity; ACP
     // resets still rotate the local session id that owns provider conversation state.
-    sessionId = isAcpSessionKey(sessionKey)
-      ? crypto.randomUUID()
-      : (entry?.sessionId ?? crypto.randomUUID());
+    sessionId =
+      isAcpSessionKey(sessionKey) || restartTombstoneParentFork
+        ? crypto.randomUUID()
+        : (entry?.sessionId ?? crypto.randomUUID());
     isNewSession = true;
     systemSent = false;
     abortedLastRun = false;
@@ -1013,6 +1015,7 @@ async function initSessionStateAttemptLocked(
         agentId,
         alreadyForked,
         parentSessionKey,
+        requireParentForkReplacement: restartTombstoneParentFork,
         readEntry,
         sessionEntry: entryToCommit,
         sessionKey,
