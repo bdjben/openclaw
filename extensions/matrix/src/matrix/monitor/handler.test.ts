@@ -1296,6 +1296,7 @@ describe("matrix monitor handler pairing account scope", () => {
       "finalized context",
     );
     expect(context.MessageThreadId).toBe("$root");
+    expect(context.ParentSessionKey).toBe("agent:ops:main");
     expect(context.ThreadStarterBody).toBe("Matrix thread root $root from Alice:\nRoot topic");
     expectMockCallWithFields(recordInboundSession, { sessionKey: "agent:ops:main:thread:$root" });
   });
@@ -1792,19 +1793,19 @@ describe("matrix monitor handler pairing account scope", () => {
           : null,
       touch,
     });
-    const { handler, recordInboundSession } = createMatrixHandlerTestHarness({
-      client: {
-        getEvent: async () =>
-          createMatrixTextMessageEvent({
-            eventId: "$root",
-            sender: "@alice:example.org",
-            body: "Root topic",
-          }),
-      },
-      isDirectMessage: false,
-      finalizeInboundContext: (ctx: unknown) => ctx,
-      getMemberDisplayName: async () => "sender",
-    });
+    const { handler, finalizeInboundContext, recordInboundSession } =
+      createMatrixHandlerTestHarness({
+        client: {
+          getEvent: async () =>
+            createMatrixTextMessageEvent({
+              eventId: "$root",
+              sender: "@alice:example.org",
+              body: "Root topic",
+            }),
+        },
+        isDirectMessage: false,
+        getMemberDisplayName: async () => "sender",
+      });
 
     await handler(
       "!room:example",
@@ -1819,6 +1820,11 @@ describe("matrix monitor handler pairing account scope", () => {
         mentions: { room: true },
       }),
     );
+    const context = requireRecord(
+      callArg(finalizeInboundContext, 0, 0, "finalized context"),
+      "finalized context",
+    );
+    expect(context.ParentSessionKey).toBeUndefined();
 
     expectMockCallWithFields(recordInboundSession, { sessionKey: "agent:bound:session-1" });
     expect(touch).toHaveBeenCalledTimes(1);
