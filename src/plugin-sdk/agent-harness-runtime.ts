@@ -132,6 +132,8 @@ type EmbeddedRunAttemptParamsBase = Omit<
   | "admittedRunContext"
   | "authoredContextTokenCap"
   | "contextEngineLogicalTurnLease"
+  | "deferSourceMessageToolDelivery"
+  | "onBeforeAgentFinalize"
   | "onContextEngineTurnCandidate"
   | "pluginHarnessToolPolicySafeDeniedTools"
   | "trajectoryRecorder"

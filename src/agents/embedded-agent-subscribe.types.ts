@@ -91,6 +91,8 @@ export type SubscribeEmbeddedAgentSessionParams = {
     assistantEntryId?: string;
     lastAssistant?: AgentMessage;
     assistantTexts: readonly string[];
+    /** Actual unsent host-owned reply, projected for freshness/next-step decisions. */
+    hostFinalDeferredCandidate?: string;
     hasAssistantVisibleText: boolean;
     isError: boolean;
     incompleteTerminalAssistant: boolean;

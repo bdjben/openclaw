@@ -4,7 +4,6 @@ import {
   buildEmbeddedRunnerAssistant,
   makeEmbeddedRunnerAttempt,
 } from "../../test-helpers/embedded-agent-runner-e2e-fixtures.js";
-import { createEmbeddedRunContextRecoveryState } from "./context-recovery-state.js";
 import { TRUNCATED_REPLY_NOTICE_TEXT } from "./incomplete-turn-resolution.js";
 import { resolveEmbeddedRunAttemptTerminalState } from "./terminal-outcome.js";
 import {
@@ -13,6 +12,12 @@ import {
   resolveEmbeddedRunTerminal,
   resolveSettledTurnFinalizationRequest,
 } from "./terminal-resolution.js";
+import {
+  emptyAssistant,
+  makeTerminalInput,
+  type TerminalInput,
+  type TerminalInputOverrides,
+} from "./terminal-resolution.test-support.js";
 import { createEmbeddedRunTerminalRetryState } from "./terminal-retry-state.js";
 
 const EMPTY_RESPONSE_RETRY_INSTRUCTION =
@@ -21,92 +26,6 @@ const REASONING_ONLY_RETRY_INSTRUCTION =
   "The previous assistant turn recorded reasoning but did not produce a user-visible answer. Continue from that partial turn and produce the visible answer now. Do not restate the reasoning or restart from scratch.";
 const SETTLED_TOOL_TERMINAL_CONTINUATION_INSTRUCTION =
   "The previous assistant turn completed its tool calls but did not produce a user-visible answer. Continue from the current transcript and produce the final user-visible answer now. Do not repeat completed tool calls or restart from scratch.";
-
-type TerminalInput = Parameters<typeof resolveEmbeddedRunTerminal>[0];
-type TerminalInputOverrides = Omit<Partial<TerminalInput>, "runParams"> & {
-  runParams?: Partial<TerminalInput["runParams"]>;
-};
-
-function emptyAssistant(overrides: Parameters<typeof buildEmbeddedRunnerAssistant>[0] = {}) {
-  return buildEmbeddedRunnerAssistant({
-    content: [{ type: "text", text: "" }],
-    ...overrides,
-  });
-}
-
-function makeTerminalInput(overrides: TerminalInputOverrides = {}): TerminalInput {
-  const assistant = overrides.attemptAssistant ?? emptyAssistant();
-  const attempt =
-    overrides.attempt ??
-    makeEmbeddedRunnerAttempt({
-      assistantTexts: [],
-      lastAssistant: assistant,
-      currentAttemptAssistant: assistant,
-      currentAttemptReplayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
-    });
-  const profileStore = { version: 1, profiles: {} } as never;
-  const runParams = {
-    sessionId: "session:terminal-resolution",
-    sessionKey: "agent:main:terminal-resolution",
-    runId: "run:terminal-resolution",
-    agentDir: "/tmp/openclaw-terminal-resolution",
-    workspaceDir: "/tmp/openclaw-terminal-resolution",
-    ...overrides.runParams,
-  } as TerminalInput["runParams"];
-  const base = {
-    runParams,
-    retryState: createEmbeddedRunTerminalRetryState(),
-    attempt,
-    attemptAssistant: attempt.currentAttemptAssistant ?? attempt.lastAssistant,
-    activeErrorContext: { provider: "openai", model: "gpt-5.6-luna" },
-    modelApi: "openai-responses",
-    executionContract: undefined,
-    terminalState: resolveEmbeddedRunAttemptTerminalState({
-      attempt,
-      assistant: attempt.currentAttemptAssistant ?? attempt.lastAssistant,
-    }),
-    payloadsWithToolMedia: [],
-    recoveredFinalAssistantPayloadsAfterPromptTimeout: undefined,
-    finalAssistantVisibleText: undefined,
-    finalAssistantRawText: undefined,
-    agentMeta: {} as never,
-    attemptToolSummary: undefined,
-    failureSignal: undefined,
-    maxReasoningOnlyRetryAttempts: 2,
-    maxEmptyResponseRetryAttempts: 1,
-    attemptCompactionCount: 0,
-    replayState: { ...attempt.replayMetadata, replayInvalid: false },
-    activePromptPersisted: true,
-    activateInternalPrompt: vi.fn(),
-    setSuppressNextUserMessagePersistence: vi.fn(),
-    armPostCompactionGuard: vi.fn(),
-    readTerminalToolPresentation: () => undefined,
-    resolveReplayInvalid: () => false,
-    setTerminalLifecycleMeta: vi.fn(),
-    maybeMarkAuthProfileFailure: vi.fn(async () => undefined),
-    assistantProfileFailureReason: null,
-    startedAtMs: Date.now(),
-    provider: "openai",
-    modelId: "gpt-5.6-luna",
-    modelTransportId: "gpt-5.6-luna",
-    modelTransportApi: "openai-responses",
-    requestTransportOverrides: "none",
-    authProfileId: undefined,
-    profileFailureStore: profileStore,
-    attemptAuthProfileStore: profileStore,
-    apiKeyInfo: null,
-    agentHarnessId: "builtin-openclaw",
-    settledTurnFinalizationOutcome: "not-attempted",
-    pluginHarnessOwnsTransport: false,
-    pluginHarnessOwnsAuthBootstrap: false,
-    reportedModelRef: { provider: "openai", model: "gpt-5.6-luna" },
-    traceAttempts: [],
-    traceAttemptUsesFallback: () => false,
-    thinkLevel: "off",
-    contextRecoveryState: createEmbeddedRunContextRecoveryState(),
-  } satisfies TerminalInput;
-  return { ...base, ...overrides, runParams };
-}
 
 async function resolveTerminalText(overrides: TerminalInputOverrides): Promise<string | undefined> {
   const resolved = await resolveEmbeddedRunTerminal(makeTerminalInput(overrides));
@@ -173,6 +92,88 @@ describe("terminal resolution", () => {
       }
     },
   );
+
+  it("deterministically discards a rejected final without payloads, text, or pending client tools", async () => {
+    const assistant = buildEmbeddedRunnerAssistant({
+      content: [{ type: "text", text: "obsolete draft" }],
+      stopReason: "toolUse",
+    });
+    const attempt = makeEmbeddedRunnerAttempt({
+      assistantTexts: ["obsolete draft"],
+      beforeAgentFinalizeDiscarded: true,
+      clientToolCalls: [{ name: "computer_use", params: { task: "stale" } }],
+      lastAssistant: assistant,
+      currentAttemptAssistant: assistant,
+      currentAttemptCompletedAssistant: assistant,
+    });
+
+    const resolved = await resolveEmbeddedRunTerminal(
+      makeTerminalInput({
+        attempt,
+        attemptAssistant: assistant,
+        finalAssistantVisibleText: "obsolete draft",
+        finalAssistantRawText: "obsolete draft",
+      }),
+    );
+
+    expect(resolved.action).toBe("complete");
+    if (resolved.action !== "complete") {
+      return;
+    }
+    expect(resolved.result.payloads).toBeUndefined();
+    expect(resolved.result.meta.finalAssistantVisibleText).toBeUndefined();
+    expect(resolved.result.meta.finalAssistantRawText).toBeUndefined();
+    expect(resolved.result.meta.pendingToolCalls).toBeUndefined();
+    expect(resolved.result.meta.stopReason).toBeUndefined();
+    expect(resolved.result.meta.intentionalTerminalCompletion).toBe("source-finalization-discard");
+  });
+
+  it.each([
+    {
+      name: "retries a completed client-tool candidate only for a tools-disabled source-local revision",
+      text: "obsolete client action",
+      stopReason: "toolUse" as const,
+      clientToolCalls: [{ name: "computer_use", params: { task: "stale" } }],
+      checksRecoveryOrder: false,
+    },
+    {
+      name: "routes a visible source-local revision before generic empty-response recovery",
+      text: "obsolete draft",
+      stopReason: "stop" as const,
+      clientToolCalls: undefined,
+      checksRecoveryOrder: true,
+    },
+  ])("$name", async ({ text, stopReason, clientToolCalls, checksRecoveryOrder }) => {
+    const assistant = buildEmbeddedRunnerAssistant({
+      content: [{ type: "text", text }],
+      stopReason,
+    });
+    const activateInternalPrompt = vi.fn();
+    const attempt = makeEmbeddedRunnerAttempt({
+      assistantTexts: [text],
+      beforeAgentFinalizeRevisionReason: "answer using the fresh room state",
+      beforeAgentFinalizeRevisionDisableTools: true,
+      ...(clientToolCalls ? { clientToolCalls } : {}),
+      lastAssistant: assistant,
+      currentAttemptAssistant: assistant,
+      currentAttemptCompletedAssistant: assistant,
+    });
+    const input = makeTerminalInput({
+      attempt,
+      attemptAssistant: assistant,
+      activateInternalPrompt,
+    });
+
+    await expect(resolveEmbeddedRunTerminal(input)).resolves.toEqual({ action: "retry" });
+    if (checksRecoveryOrder) {
+      expect(input.retryState.beforeFinalizeRevisionAttempts).toBe(1);
+      expect(input.retryState.emptyResponseAttempts).toBe(0);
+    }
+    expect(input.retryState.disableToolsForBeforeFinalizeRevision).toBe(true);
+    expect(activateInternalPrompt).toHaveBeenCalledWith(
+      expect.stringContaining("answer using the fresh room state"),
+    );
+  });
 
   it.each([
     {

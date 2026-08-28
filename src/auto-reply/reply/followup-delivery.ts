@@ -27,12 +27,18 @@ import type { AgentTurnExecutionResult } from "./agent-runner-execution.types.js
 import { buildEmptyInteractiveReplyPayload } from "./agent-runner-failure-reply.js";
 import type { AccountedAgentTurn } from "./agent-runner-result-accounting.js";
 import { appendUsageLine, resolveResponseUsageLine } from "./agent-runner-usage-line.js";
+import { mintQueuedAutomaticRoomEventFinalCapability } from "./automatic-room-event-final-capability.js";
 import { resolveFollowupDeliveryPayloads } from "./followup-delivery-payloads.js";
 import type { AdmittedFollowupTurn, FollowupRunnerParams } from "./followup-turn-admission.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
 import { warnPrivateMessageToolFinal } from "./private-message-tool-final.js";
-import { enqueueFollowupRun, resolveQueueSettings, type FollowupRun } from "./queue.js";
+import {
+  enqueueFollowupRun,
+  hasAuthorizedQueuedRoomEventSourceDelivery,
+  resolveQueueSettings,
+  type FollowupRun,
+} from "./queue.js";
 import type { ReplyDispatchKind } from "./reply-dispatcher.types.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { buildSessionsYieldAcknowledgmentPayload } from "./sessions-yield-acknowledgment.js";
@@ -76,10 +82,8 @@ export function resolveFollowupDeliveryDecision(params: {
   if (turn.sendPolicy === "deny") {
     return { kind: "suppress", reason: "send-policy" };
   }
-  if (
-    turn.queued.currentInboundEventKind === "room_event" &&
-    !isInternalMessageChannel(turn.queued.originatingChannel)
-  ) {
+  const authorizedQueuedRoomEvent = hasAuthorizedQueuedRoomEventSourceDelivery(turn.queued);
+  if (turn.queued.currentInboundEventKind === "room_event" && !authorizedQueuedRoomEvent) {
     return { kind: "suppress", reason: "room-event" };
   }
   if (
@@ -88,15 +92,22 @@ export function resolveFollowupDeliveryDecision(params: {
   ) {
     return { kind: "suppress", reason: "aborted" };
   }
+  const sourcePolicyContext = {
+    ChatType: turn.queued.originatingChatType ?? turn.queued.run.chatType,
+    InboundEventKind: turn.queued.currentInboundEventKind,
+    Provider: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
+    Surface: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
+  };
   const sourcePolicy = resolveSourceReplyVisibilityPolicy({
     cfg: turn.config,
-    ctx: {
-      ChatType: turn.queued.originatingChatType ?? turn.queued.run.chatType,
-      InboundEventKind: turn.queued.currentInboundEventKind,
-      Provider: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
-      Surface: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
-    },
+    ctx: sourcePolicyContext,
     requested: turn.queued.run.sourceReplyDeliveryMode ?? opts?.sourceReplyDeliveryMode,
+    automaticRoomEventFinalCapability: authorizedQueuedRoomEvent
+      ? mintQueuedAutomaticRoomEventFinalCapability({
+          queued: turn.queued.queuedSourceReplyDelivery,
+          context: sourcePolicyContext,
+        })
+      : undefined,
     sendPolicy: turn.sendPolicy,
   });
   const hasDestination = Boolean(
@@ -308,6 +319,7 @@ async function sendFollowupPayloads(params: {
 }): Promise<void> {
   const { turn, defaults } = params;
   const { originatingChannel, originatingTo } = turn.queued;
+  const queuedSourceReplyDelivery = turn.queued.queuedSourceReplyDelivery;
   const originRoutable = Boolean(isRoutableChannel(originatingChannel) && originatingTo);
   const deliveryPlan = buildAgentRuntimeDeliveryPlan({
     provider: params.resolved?.provider ?? turn.queued.run.provider,
@@ -332,7 +344,9 @@ async function sendFollowupPayloads(params: {
   }
   const deliverQueuedBatch = sourceDisposition?.deliver;
   const fallbackDispatcher = sourceDisposition ? undefined : defaults.opts?.onBlockReply;
-  const dispatcherAvailable = Boolean(deliverQueuedBatch || fallbackDispatcher);
+  const dispatcherAvailable = Boolean(
+    deliverQueuedBatch || queuedSourceReplyDelivery || fallbackDispatcher,
+  );
   if (!originRoutable && !dispatcherAvailable) {
     defaultRuntime.error?.(
       "followup queue: completed with payloads but no origin route or visible dispatcher is available",
@@ -372,16 +386,30 @@ async function sendFollowupPayloads(params: {
       continue;
     }
     const route =
-      providerRoute?.route === "origin" && originRoutable
-        ? "origin"
-        : providerRoute?.route === "dispatcher" && dispatcherAvailable
-          ? "dispatcher"
-          : originRoutable
-            ? "origin"
-            : "dispatcher";
+      deliverQueuedBatch || queuedSourceReplyDelivery
+        ? "dispatcher"
+        : providerRoute?.route === "origin" && originRoutable
+          ? "origin"
+          : providerRoute?.route === "dispatcher" && dispatcherAvailable
+            ? "dispatcher"
+            : originRoutable
+              ? "origin"
+              : "dispatcher";
     await typing.signalTextDelta(payload.text);
     if (route !== "origin") {
-      await dispatchPayload(payload);
+      if (queuedSourceReplyDelivery && !deliverQueuedBatch) {
+        const outcome = await queuedSourceReplyDelivery.deliver(payload, {
+          kind: params.kind,
+          runId: params.runId,
+        });
+        if (outcome === "failed-before-deliver" || outcome === "failed-deliver") {
+          defaultRuntime.error?.(
+            `followup queue: retained source dispatcher failed (${outcome}); refusing fallback to a later turn owner`,
+          );
+        }
+      } else {
+        await dispatchPayload(payload);
+      }
     } else if (isRoutableChannel(originatingChannel) && originatingTo) {
       const metadata = getReplyPayloadMetadata(payload);
       const result = await routeReply({

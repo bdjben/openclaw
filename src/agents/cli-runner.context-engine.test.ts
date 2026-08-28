@@ -376,6 +376,229 @@ describe("runPreparedCliAgent context engine lifecycle", () => {
     expect(dispose).not.toHaveBeenCalled();
   });
 
+  it("revises a CLI final candidate on the same backend before persistence and final hooks", async () => {
+    const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
+    const context = buildPreparedContext(createContextEngine({ afterTurn }));
+    const onAccepted = vi.fn(async () => {});
+    context.params.onBeforeAgentFinalize = vi
+      .fn()
+      .mockResolvedValueOnce({
+        action: "revise",
+        instruction: "rewrite using the new Matrix message",
+        disableTools: true,
+        onAccepted,
+      })
+      .mockResolvedValueOnce({ action: "continue" });
+    executePreparedCliRunMock
+      .mockResolvedValueOnce({
+        text: "stale draft",
+        rawText: "stale draft",
+        sessionId: "external-cli-session-1",
+      })
+      .mockResolvedValueOnce({
+        text: "fresh rewrite",
+        rawText: "fresh rewrite",
+        sessionId: "external-cli-session-2",
+      });
+    const revisionCleanup = vi.fn(async () => {});
+    prepareCliRunContextMock.mockImplementationOnce(async (revisionParams) => ({
+      ...context,
+      params: {
+        ...context.params,
+        ...revisionParams,
+        disableTools: true,
+      },
+      preparedBackend: {
+        ...context.preparedBackend,
+        cleanup: revisionCleanup,
+      },
+      reusableCliSession: {
+        mode: "reuse" as const,
+        sessionId: "external-cli-session-1",
+      },
+    }));
+
+    const result = await runPreparedCliAgent(context);
+
+    expect(result.payloads).toEqual([{ text: "fresh rewrite" }]);
+    expect(result.meta.finalAssistantVisibleText).toBe("fresh rewrite");
+    expect(executePreparedCliRunMock).toHaveBeenCalledTimes(2);
+    expect(prepareCliRunContextMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "claude-cli",
+        model: "sonnet-4.6",
+        prompt: "rewrite using the new Matrix message",
+        transcriptPrompt: "rewrite using the new Matrix message",
+        disableTools: true,
+        toolsAllow: undefined,
+        cliToolAvailability: undefined,
+        cliSessionId: "external-cli-session-1",
+        suppressNextUserMessagePersistence: true,
+      }),
+    );
+    expect(onAccepted).toHaveBeenCalledOnce();
+    expect(revisionCleanup).toHaveBeenCalledOnce();
+    const turnMessages = afterTurn.mock.calls[0]?.[0].messages.slice(
+      afterTurn.mock.calls[0]?.[0].prePromptMessageCount,
+    );
+    expect(turnMessages).toHaveLength(2);
+    expectMessageText(turnMessages?.[0], "transcript visible ask");
+    expectMessageText(turnMessages?.[1], "fresh rewrite");
+  });
+
+  it("gates and delivers the retained host-final reply instead of a CLI acknowledgement", async () => {
+    const context = buildPreparedContext(createContextEngine());
+    const gate = vi.fn(async () => ({ action: "continue" as const }));
+    context.params.onBeforeAgentFinalize = gate;
+    executePreparedCliRunMock.mockResolvedValueOnce({
+      text: "NO_REPLY",
+      rawText: "NO_REPLY",
+      sessionId: "external-cli-session-1",
+      messagingToolSourceReplyPayloads: [
+        {
+          text: "Actual answer prepared by message.send",
+          hostFinalDeferred: true,
+        },
+      ],
+    });
+
+    const result = await runPreparedCliAgent(context);
+
+    expect(gate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastAssistantMessage: "Actual answer prepared by message.send",
+      }),
+    );
+    expect(result.payloads).toEqual([{ text: "Actual answer prepared by message.send" }]);
+    expect(JSON.stringify(result.payloads)).not.toContain("NO_REPLY");
+  });
+
+  it("gates a media-only host-final payload without treating the CLI response as empty", async () => {
+    const context = buildPreparedContext(createContextEngine());
+    const gate = vi.fn(async () => ({ action: "discard" as const }));
+    context.params.onBeforeAgentFinalize = gate;
+    executePreparedCliRunMock.mockResolvedValueOnce({
+      text: "",
+      rawText: "",
+      sessionId: "external-cli-session-1",
+      messagingToolSourceReplyPayloads: [
+        {
+          mediaUrl: "https://example.org/final.png",
+          hostFinalDeferred: true,
+        },
+      ],
+    });
+
+    const result = await runPreparedCliAgent(context);
+
+    expect(gate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastAssistantMessage: expect.stringContaining("host-final-reply-payload"),
+      }),
+    );
+    expect(gate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastAssistantMessage: expect.stringContaining("https://example.org/final.png"),
+      }),
+    );
+    expect(result.payloads).toBeUndefined();
+    expect(result.meta.finalAssistantVisibleText).toBeUndefined();
+  });
+
+  it("replaces a retained host-final payload when the freshness gate requests a CLI rewrite", async () => {
+    const context = buildPreparedContext(createContextEngine());
+    const gate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        action: "revise",
+        instruction: "rewrite using fresh room activity",
+        disableTools: true,
+      })
+      .mockResolvedValueOnce({ action: "continue" });
+    context.params.onBeforeAgentFinalize = gate;
+    executePreparedCliRunMock
+      .mockResolvedValueOnce({
+        text: "NO_REPLY",
+        rawText: "NO_REPLY",
+        sessionId: "external-cli-session-1",
+        messagingToolSourceReplyPayloads: [
+          { text: "Stale tool-authored answer", hostFinalDeferred: true },
+        ],
+      })
+      .mockResolvedValueOnce({
+        text: "Fresh rewritten answer",
+        rawText: "Fresh rewritten answer",
+        sessionId: "external-cli-session-2",
+      });
+    prepareCliRunContextMock.mockImplementationOnce(async (revisionParams) => ({
+      ...context,
+      params: { ...context.params, ...revisionParams, disableTools: true },
+      reusableCliSession: { mode: "reuse" as const, sessionId: "external-cli-session-1" },
+    }));
+
+    const result = await runPreparedCliAgent(context);
+
+    expect(gate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ lastAssistantMessage: "Stale tool-authored answer" }),
+    );
+    expect(result.payloads).toEqual([{ text: "Fresh rewritten answer" }]);
+    expect(JSON.stringify(result)).not.toContain("Stale tool-authored answer");
+  });
+
+  it("falls back to the pre-rewrite CLI draft when a zero-tool revision cannot be prepared", async () => {
+    const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
+    const context = buildPreparedContext(createContextEngine({ afterTurn }));
+    context.params.onBeforeAgentFinalize = vi.fn(async () => ({
+      action: "revise" as const,
+      instruction: "rewrite",
+      disableTools: true as const,
+    }));
+    executePreparedCliRunMock.mockResolvedValueOnce({
+      text: "safe original",
+      rawText: "safe original",
+      sessionId: "external-cli-session-1",
+    });
+    prepareCliRunContextMock.mockRejectedValueOnce(new Error("zero-tool cap unavailable"));
+
+    const result = await runPreparedCliAgent(context);
+
+    expect(result.payloads).toEqual([{ text: "safe original" }]);
+    expect(executePreparedCliRunMock).toHaveBeenCalledOnce();
+    const turnMessages = afterTurn.mock.calls[0]?.[0].messages.slice(
+      afterTurn.mock.calls[0]?.[0].prePromptMessageCount,
+    );
+    expectMessageText(turnMessages?.at(-1), "safe original");
+  });
+
+  it("deterministically discards a CLI final without persisting or finalizing the rejected assistant", async () => {
+    const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
+    const context = buildPreparedContext(createContextEngine({ afterTurn }));
+    const onAccepted = vi.fn(async () => {});
+    context.params.onBeforeAgentFinalize = vi.fn(async () => ({
+      action: "discard" as const,
+      onAccepted,
+    }));
+    executePreparedCliRunMock.mockResolvedValueOnce({
+      text: "do not deliver this",
+      rawText: "do not deliver this",
+      sessionId: "external-cli-session-1",
+    });
+
+    const result = await runPreparedCliAgent(context);
+
+    expect(result.payloads).toBeUndefined();
+    expect(result.meta.finalAssistantVisibleText).toBeUndefined();
+    expect(result.meta.finalAssistantRawText).toBeUndefined();
+    expect(executePreparedCliRunMock).toHaveBeenCalledOnce();
+    expect(onAccepted).toHaveBeenCalledOnce();
+    const turnMessages = afterTurn.mock.calls[0]?.[0].messages.slice(
+      afterTurn.mock.calls[0]?.[0].prePromptMessageCount,
+    );
+    expect(turnMessages).toHaveLength(1);
+    expectMessageText(turnMessages?.[0], "transcript visible ask");
+  });
+
   it("does not emit CLI turn facts without transcript admission", async () => {
     const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
     const maintain = vi.fn<NonNullable<ContextEngine["maintain"]>>(async () =>

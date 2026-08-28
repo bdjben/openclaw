@@ -191,6 +191,7 @@ export async function runEmbeddedFallbackCandidate(
         explicitSkillSelections: turn.followupRun.explicitSkillSelections,
         extraSystemPrompt: turn.followupRun.run.extraSystemPrompt,
         sourceReplyDeliveryMode: turn.followupRun.run.sourceReplyDeliveryMode,
+        deferSourceMessageToolDelivery: turn.followupRun.run.deferSourceMessageToolDelivery,
         forceMessageTool: turn.followupRun.run.sourceReplyDeliveryMode === "message_tool_only",
         // Heartbeat ambient routes are delivery context, never implicit message recipients.
         // Omit false so subagent sessions keep their downstream default.
@@ -210,6 +211,7 @@ export async function runEmbeddedFallbackCandidate(
         suppressToolErrorWarnings: turn.opts?.suppressToolErrorWarnings,
         toolsAllow: turn.opts?.toolsAllow,
         disableTools: turn.opts?.disableTools,
+        onBeforeAgentFinalize: turn.followupRun.onBeforeAgentFinalize,
         toolAuthorityFingerprint: resolveFollowupRunToolAuthorityFingerprint(
           turn.followupRun,
           toolAuthorityRoute,

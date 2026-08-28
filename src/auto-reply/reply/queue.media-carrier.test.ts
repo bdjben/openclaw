@@ -295,6 +295,11 @@ describe("followup prompt metadata carrier", () => {
       channelId: "test",
       participantId: "person-1",
     });
+    source.queuedSourceReplyDelivery = {
+      deliver: async () => "delivered",
+      presentationOptions: {},
+    } as never;
+    source.onBeforeAgentFinalize = async () => ({ action: "continue" });
 
     const retry = createOverflowSummaryRetrySource(source);
 
@@ -304,6 +309,8 @@ describe("followup prompt metadata carrier", () => {
     expect(retry.media).toEqual(source.media);
     expect(retry.explicitSkillSelections).toEqual(source.explicitSkillSelections);
     expect(retry.channelAdmissionEvidence).toBe(source.channelAdmissionEvidence);
+    expect(retry.queuedSourceReplyDelivery).toBe(source.queuedSourceReplyDelivery);
+    expect(retry.onBeforeAgentFinalize).toBe(source.onBeforeAgentFinalize);
     expectCombinedCarrierFacts(retry);
   });
 });

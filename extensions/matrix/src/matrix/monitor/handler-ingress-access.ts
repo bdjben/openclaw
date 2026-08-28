@@ -67,6 +67,8 @@ export async function resolveMatrixIngressAccess(config: {
     accountAllowBots,
     configuredBotUserIds,
     needsRoomAliasesForConfig,
+    turnTakingRoomsConfig,
+    needsRoomAliasesForTurnTakingConfig,
     getRoomInfo,
     getMemberDisplayName,
   } = handler;
@@ -105,7 +107,7 @@ export async function resolveMatrixIngressAccess(config: {
   }
 
   const roomInfoForConfig =
-    isRoom && needsRoomAliasesForConfig
+    (isRoom && needsRoomAliasesForConfig) || needsRoomAliasesForTurnTakingConfig
       ? await getRoomInfo(roomId, { includeAliases: true })
       : undefined;
   const roomAliasesForConfig = roomInfoForConfig
@@ -119,15 +121,25 @@ export async function resolveMatrixIngressAccess(config: {
       })
     : undefined;
   const roomConfig = roomConfigInfo?.config;
+  const turnTakingRoomConfig = resolveMatrixRoomConfig({
+    rooms: turnTakingRoomsConfig,
+    roomId,
+    aliases: roomAliasesForConfig,
+  }).config;
+  const turnTakingDisabled = turnTakingRoomConfig?.turnTaking === false;
   const allowBotsMode = resolveMatrixAllowBotsMode(roomConfig?.allowBots ?? accountAllowBots);
-  const isConfiguredBotSender = configuredBotUserIds.has(senderId);
+  // The runtime-only flag is minted only by the coordinator after intersecting
+  // authenticated monitor identities with live joined membership. It also
+  // covers access-token accounts whose MXID was unavailable at config parse.
+  const trustedEnhancedFinal = event["__openclawTrustedEnhancedFinal"] === true;
+  const isConfiguredBotSender = configuredBotUserIds.has(senderId) || trustedEnhancedFinal;
   const roomMatchMeta = roomConfigInfo
     ? `matchKey=${roomConfigInfo.matchKey ?? "none"} matchSource=${
         roomConfigInfo.matchSource ?? "none"
       }`
     : "matchKey=none matchSource=none";
 
-  if (isConfiguredBotSender && allowBotsMode === "off") {
+  if (isConfiguredBotSender && allowBotsMode === "off" && !trustedEnhancedFinal) {
     logVerboseMessage(
       `matrix: drop configured bot sender=${senderId} (allowBots=false${isDirectMessage ? "" : `, ${roomMatchMeta}`})`,
     );
@@ -139,6 +151,7 @@ export async function resolveMatrixIngressAccess(config: {
       ? {
           scopeId: accountId,
           conversationId: roomId,
+          eventId: messageId,
           senderId,
           receiverId: selfUserId,
           config: mergePairLoopGuardConfig(
@@ -302,6 +315,8 @@ export async function resolveMatrixIngressAccess(config: {
     markReservedHistorySlotConsumed,
     commitInboundEventIfClaimedAndDiscardReserved,
     roomConfig,
+    turnTakingDisabled,
+    trustedEnhancedFinal,
     allowBotsMode,
     isConfiguredBotSender,
     selfUserId,
