@@ -358,6 +358,10 @@ export function prepareEmbeddedAttemptStream(input: {
     blockReplyBreak: attempt.blockReplyBreak,
     blockReplyChunking: attempt.blockReplyChunking,
     onPartialReply: attempt.onPartialReply,
+    // A source gate owns provisional previews; global hooks retain their full
+    // delivery quarantine even when the same turn also has a source finalizer.
+    partialReplyIsProvisional:
+      attempt.onBeforeAgentFinalize !== undefined && !hookRunner?.hasHooks("before_agent_finalize"),
     onAssistantMessageStart: attempt.onAssistantMessageStart,
     onExecutionPhase: attempt.onExecutionPhase,
     onAgentEvent: attempt.onAgentEvent,

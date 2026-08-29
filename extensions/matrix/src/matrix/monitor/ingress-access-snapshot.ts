@@ -5,10 +5,7 @@ import type { MatrixHandlerRuntimeConfig } from "./handler-types.js";
 import { resolveMatrixRoomConfig } from "./rooms.js";
 import { resolveMatrixInboundRoute } from "./route.js";
 import { resolveMatrixThreadRouting } from "./threads.js";
-import type {
-  MatrixReceiverAccess,
-  MatrixReceiverAccessInput,
-} from "./turn-taking-coordinator-types.js";
+import type { MatrixReceiverAccessInput } from "./turn-taking-coordinator-types.js";
 
 export async function prepareMatrixIngressAccessSnapshot(input: {
   handler: MatrixHandlerRuntimeConfig;
@@ -112,8 +109,8 @@ export function createMatrixReceiverAccessPreparer(
     Parameters<typeof prepareMatrixIngressAccessSnapshot>[0],
     "readStoreAllowFrom" | "resolveLiveAccountAllowlists"
   >,
-): (input: MatrixReceiverAccessInput) => Promise<MatrixReceiverAccess> {
-  return async (input) => {
+) {
+  return async (input: MatrixReceiverAccessInput) => {
     const selfUserId = await handler.client.getUserId();
     const isDirectMessage = await handler.directTracker.isDirectMessage({
       roomId: input.roomId,

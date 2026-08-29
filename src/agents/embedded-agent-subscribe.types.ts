@@ -68,6 +68,8 @@ export type SubscribeEmbeddedAgentSessionParams = {
   blockReplyBreak?: "text_end" | "message_end";
   blockReplyChunking?: BlockReplyChunking;
   onPartialReply?: (payload: PartialReplyPayload) => boolean | void | Promise<boolean | void>;
+  /** Source-owned preview only; committed events and blocks still await terminal acceptance. */
+  partialReplyIsProvisional?: boolean;
   onAssistantMessageStart?: () => void | Promise<void>;
   onExecutionPhase?: (info: {
     phase: "tool_execution_started";
