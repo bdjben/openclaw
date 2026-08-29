@@ -24,7 +24,11 @@ import {
 import type { ReplyPayload } from "../types.js";
 import { normalizeAssistantFinalDeliveryText } from "./agent-runner-core.js";
 import type { AgentTurnExecutionResult } from "./agent-runner-execution.types.js";
-import { buildEmptyInteractiveReplyPayload } from "./agent-runner-failure-reply.js";
+import {
+  buildEmptyInteractiveReplyPayload,
+  markPostCompactionModelFailurePayload,
+  renderPostCompactionModelFailurePayload,
+} from "./agent-runner-failure-reply.js";
 import type { AccountedAgentTurn } from "./agent-runner-result-accounting.js";
 import { appendUsageLine, resolveResponseUsageLine } from "./agent-runner-usage-line.js";
 import { mintQueuedAutomaticRoomEventFinalCapability } from "./automatic-room-event-final-capability.js";
@@ -98,6 +102,13 @@ export function resolveFollowupDeliveryDecision(params: {
     Provider: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
     Surface: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
   };
+  const postCompactionModelFailure = execution.outcome.postCompactionModelFailure;
+  const renderFailurePayloads = (payloads: ReplyPayload[]) =>
+    payloads.map((payload) =>
+      renderPostCompactionModelFailurePayload(
+        markPostCompactionModelFailurePayload(postCompactionModelFailure, payload),
+      ),
+    );
   const sourcePolicy = resolveSourceReplyVisibilityPolicy({
     cfg: turn.config,
     ctx: sourcePolicyContext,
@@ -142,12 +153,14 @@ export function resolveFollowupDeliveryDecision(params: {
     ) {
       return { kind: "suppress", reason: "message-tool-only" };
     }
-    const payloads = resolveFollowupDeliveryPayloads({
-      ...deliveryContext,
-      payloads: [execution.outcome.payload],
-      reasoningPayloadsEnabled: opts?.reasoningPayloadsEnabled === true,
-      commentaryPayloadsEnabled: opts?.commentaryPayloadsEnabled === true,
-    });
+    const payloads = renderFailurePayloads(
+      resolveFollowupDeliveryPayloads({
+        ...deliveryContext,
+        payloads: [execution.outcome.payload],
+        reasoningPayloadsEnabled: opts?.reasoningPayloadsEnabled === true,
+        commentaryPayloadsEnabled: opts?.commentaryPayloadsEnabled === true,
+      }),
+    );
     return payloads.length > 0
       ? {
           kind: "deliver",
@@ -295,6 +308,7 @@ export function resolveFollowupDeliveryDecision(params: {
   if (responseUsageLine) {
     payloads = appendUsageLine(payloads, responseUsageLine);
   }
+  payloads = renderFailurePayloads(payloads);
   if (sourcePolicy.sourceReplyDeliveryMode === "message_tool_only") {
     const explicitlyDeliverable = payloads.filter(
       (payload) => getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true,

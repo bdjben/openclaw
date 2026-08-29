@@ -127,6 +127,7 @@ function buildPreparedContext(contextEngine: ContextEngine): PreparedCliRunConte
       bundleMcp: false,
       pluginId: "anthropic",
     },
+    executionTarget: { kind: "process" },
     preparedBackend: {
       backend,
       env: {},
