@@ -561,6 +561,7 @@ export async function runPreparedCliAgent(
               payloads: undefined,
               meta: {
                 ...runResult.meta,
+                intentionalTerminalCompletion: "source-finalization-discard" as const,
                 finalAssistantVisibleText: undefined,
                 finalAssistantRawText: undefined,
                 stopReason: undefined,

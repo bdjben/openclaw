@@ -196,7 +196,7 @@ async function prepareCliRevisionContext(params: {
   successorSessionId?: string;
 }): Promise<PreparedCliRunContext> {
   const { prepareCliRunContext } = await import("./prepare.runtime.js");
-  const revisionContext = await prepareCliRunContext({
+  return await prepareCliRunContext({
     ...params.originalContext.params,
     prompt: params.instruction,
     transcriptPrompt: params.instruction,
@@ -214,8 +214,6 @@ async function prepareCliRevisionContext(params: {
     onBeforeFreshCliSessionRetry: undefined,
     suppressNextUserMessagePersistence: true,
   });
-  assertMatchingCliRevisionRuntime(params.originalContext, revisionContext);
-  return revisionContext;
 }
 
 async function acceptSourceLocalCleanup(
@@ -268,6 +266,7 @@ export async function resolveAcceptedCliFinalCandidate(params: {
   let acceptedFallbackCliSessionId = params.fallbackCliSessionId;
   let revisionAttempt = 0;
   let discarded = false;
+  const gate = params.originalContext.params.onBeforeAgentFinalize;
   try {
     while (true) {
       const { output, finalCandidateText, sourceReplyWasDelivered } = acceptedResult;
@@ -275,7 +274,6 @@ export async function resolveAcceptedCliFinalCandidate(params: {
       if (!terminalInterruption) {
         await assertCliRuntimeBinding(acceptedContext);
       }
-      const gate = params.originalContext.params.onBeforeAgentFinalize;
       if (!gate || terminalInterruption || finalCandidateText.length === 0) {
         break;
       }
@@ -316,22 +314,20 @@ export async function resolveAcceptedCliFinalCandidate(params: {
       }
 
       let revisionContext: PreparedCliRunContext | undefined;
+      let revisionResult: CliAttemptResult;
+      const successorSessionId = output.sessionId ?? acceptedFallbackCliSessionId;
       try {
-        const successorSessionId = output.sessionId ?? acceptedFallbackCliSessionId;
         revisionContext = await prepareCliRevisionContext({
           originalContext: params.originalContext,
           instruction: decision.instruction,
           successorSessionId,
         });
+        assertMatchingCliRevisionRuntime(params.originalContext, revisionContext);
         await acceptSourceLocalCleanup(decision.onAccepted);
-        acceptedResult = await params.executeAttemptForContext(
+        revisionResult = await params.executeAttemptForContext(
           revisionContext,
           resolveCliSessionId(revisionContext.reusableCliSession),
         );
-        await assertCliRuntimeBinding(revisionContext);
-        acceptedContext = revisionContext;
-        acceptedFallbackCliSessionId = successorSessionId;
-        revisionAttempt += 1;
       } catch (error) {
         cliBackendLog.warn(
           `CLI final-candidate revision failed; sending the pre-rewrite draft: ${formatErrorMessage(error)}`,
@@ -340,6 +336,18 @@ export async function resolveAcceptedCliFinalCandidate(params: {
       } finally {
         await cleanupCliRevisionContext(revisionContext);
       }
+      // Binding failures are terminal, not recoverable rewrite failures. Publish
+      // the candidate only after validation, including any awaited cleanup.
+      await assertCliRuntimeBinding(revisionContext);
+      acceptedResult = revisionResult;
+      acceptedContext = revisionContext;
+      acceptedFallbackCliSessionId = successorSessionId;
+      revisionAttempt += 1;
+    }
+    // Finalizers and accepted-action cleanup can outlive the checked runtime.
+    // Revalidate every terminal decision before the caller persists it.
+    if (gate && !acceptedResult.output.terminalInterruption) {
+      await assertCliRuntimeBinding(acceptedContext);
     }
   } catch (error) {
     throw attachCliMessagingDeliveryEvidence(error, acceptedResult.output);

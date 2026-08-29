@@ -19,6 +19,11 @@ describe("Matrix turn-taking coordinator: finalization", () => {
     vi.useFakeTimers();
     try {
       const coordinator = createMatrixTurnTakingCoordinator();
+      register(coordinator, {
+        accountId: "alpha",
+        userId: "@alpha:example.org",
+        getJoinedRoomMembers: vi.fn(async () => ["@alpha:example.org"]),
+      });
       coordinator.observeMessage({
         roomId: "!discard:example.org",
         eventId: "$trigger",
@@ -34,6 +39,8 @@ describe("Matrix turn-taking coordinator: finalization", () => {
       });
       const onDiscardAccepted = vi.fn();
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!discard:example.org",
@@ -132,6 +139,8 @@ describe("Matrix turn-taking coordinator: finalization", () => {
         observationId: previewIngress.observationId,
       });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!withdrawn:example.org",
@@ -352,15 +361,26 @@ describe("Matrix turn-taking coordinator: finalization", () => {
       });
     }
     expect(
-      coordinator.readFreshness({ roomId: "!room-0:example.org", afterSequence: 0 }).entries,
+      coordinator.readFreshness({
+        view: { includesContext: () => true },
+        roomId: "!room-0:example.org",
+        afterSequence: 0,
+      }).entries,
     ).toEqual([]);
     expect(
-      coordinator.readFreshness({ roomId: "!room-256:example.org", afterSequence: 0 }).entries[0]
-        ?.body.length,
+      coordinator.readFreshness({
+        view: { includesContext: () => true },
+        roomId: "!room-256:example.org",
+        afterSequence: 0,
+      }).entries[0]?.body.length,
     ).toBe(2_000);
     cleanup();
     expect(
-      coordinator.readFreshness({ roomId: "!room-256:example.org", afterSequence: 0 }).entries,
+      coordinator.readFreshness({
+        view: { includesContext: () => true },
+        roomId: "!room-256:example.org",
+        afterSequence: 0,
+      }).entries,
     ).toEqual([]);
   });
 });

@@ -176,6 +176,11 @@ export function createMatrixPreviewCore(state: MatrixTurnTakingState) {
       return false;
     }
     const prior = state.authorizedActivePreviews.get(key);
+    // Multiple receivers authorize the same immutable Matrix event. Their
+    // repeated observation is valid but must not invent newer room activity.
+    if (prior && exactActivePreviewMatches({ preview: prior, ...input })) {
+      return true;
+    }
     if (
       prior &&
       (!previewLineageMatches(prior.marker, input.envelope.marker) ||

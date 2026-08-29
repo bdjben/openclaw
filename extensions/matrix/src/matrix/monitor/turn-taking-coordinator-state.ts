@@ -10,6 +10,8 @@ import type {
   RoomMembership,
   StandaloneFinalAssembly,
   StandaloneFinalTombstone,
+  MatrixReceiverAccessInput,
+  MatrixReceiverView,
 } from "./turn-taking-coordinator-types.js";
 import {
   boundedMapSet,
@@ -31,6 +33,34 @@ export function createMatrixTurnTakingState(options?: {
     Math.trunc(options?.maxEarlyPreviewRedactions ?? MAX_EARLY_PREVIEW_REDACTIONS),
   );
   const monitors = new Map<string, RegisteredMonitor>();
+  const prepareReceiverView = async (
+    accountId: string,
+    input: MatrixReceiverAccessInput,
+  ): Promise<MatrixReceiverView | undefined> => {
+    const monitor = monitors.get(accountId);
+    const prepareAccess = monitor?.prepareAccess;
+    if (!monitor || !prepareAccess) {
+      return undefined;
+    }
+    const isCurrent = () =>
+      monitors.get(accountId) === monitor && monitor.prepareAccess === prepareAccess;
+    try {
+      const access = await prepareAccess(input);
+      if (!isCurrent()) {
+        return undefined;
+      }
+      return {
+        ...access,
+        isCurrent,
+        includesContext: (senderId) => isCurrent() && access.includesContext(senderId),
+      };
+    } catch (error) {
+      monitor.log(
+        `matrix turn-taking receiver access unavailable account=${accountId} room=${input.roomId}: ${String(error)}`,
+      );
+      return undefined;
+    }
+  };
   const roomMembership = new Map<string, RoomMembership>();
   const decisions = new Map<string, CachedDecision>();
   const roomJournal = new Map<string, JournalEntry[]>();
@@ -297,6 +327,7 @@ export function createMatrixTurnTakingState(options?: {
   return {
     now,
     monitors,
+    prepareReceiverView,
     roomMembership,
     decisions,
     roomJournal,

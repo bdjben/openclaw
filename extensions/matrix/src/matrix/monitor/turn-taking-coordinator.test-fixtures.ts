@@ -26,16 +26,6 @@ vi.mock("../accounts.js", () => ({
   resolveMatrixAccountUserId: ({ accountId }: { accountId: string }) => `@${accountId}:example.org`,
 }));
 
-vi.mock("./route.js", () => ({
-  resolveMatrixInboundRoute: ({ accountId }: { accountId: string }) => ({
-    route: {
-      accountId,
-      agentId: `agent-${accountId}`,
-      sessionKey: `agent:${accountId}:main`,
-    },
-  }),
-}));
-
 const coordinatorModule = await import("./turn-taking-coordinator.js");
 
 export const createMatrixTurnTakingCoordinator =
@@ -66,6 +56,11 @@ export function register(
     getJoinedRoomMembers: ReturnType<typeof vi.fn>;
     getEvent?: ReturnType<typeof vi.fn>;
     getRelations?: ReturnType<typeof vi.fn>;
+    prepareAccess?: NonNullable<
+      Parameters<
+        ReturnType<typeof createMatrixTurnTakingCoordinator>["registerMonitor"]
+      >[0]["prepareAccess"]
+    >;
   },
 ) {
   return coordinator.registerMonitor({
@@ -79,6 +74,14 @@ export function register(
     } as never,
     core: createCore(),
     log: vi.fn(),
+    prepareAccess:
+      params.prepareAccess ??
+      (async () => ({
+        agentId: `agent-${params.accountId}`,
+        canParticipate: true,
+        isDirectMessage: false,
+        includesContext: () => true,
+      })),
   });
 }
 

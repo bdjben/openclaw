@@ -32,13 +32,26 @@ export function createMatrixTurnTakingCoordinator(options?: {
   });
 
   return {
+    configureMonitorAccess(
+      accountId: string,
+      prepareAccess: NonNullable<RegisteredMonitor["prepareAccess"]>,
+    ): void {
+      const monitor = state.monitors.get(accountId);
+      if (monitor && monitor.prepareAccess !== prepareAccess) {
+        state.decisions.clear();
+        monitor.prepareAccess = prepareAccess;
+      }
+    },
     registerMonitor(registration: RegisteredMonitor): () => void {
+      // Decisions belong to the current set of receiver policies and routes.
+      state.decisions.clear();
       state.monitors.set(registration.accountId, registration);
       return () => {
         if (state.monitors.get(registration.accountId) !== registration) {
           return;
         }
         state.monitors.delete(registration.accountId);
+        state.decisions.clear();
         if (state.monitors.size === 0) {
           state.clear();
         }

@@ -356,9 +356,10 @@ export async function resolveMatrixIngressContent(config: {
         roomId,
         accountId,
         senderId,
-        isDirectMessage,
-        threadId: thread.threadId,
+        threadId: threadRootId,
         eventTs,
+        eventId: messageId,
+        trustedEnhancedFinal,
       });
       enhancedTurnTakingEligible = eligibility.eligible;
       if (eligibility.eligible) {
@@ -368,7 +369,7 @@ export async function resolveMatrixIngressContent(config: {
           senderId,
           body: participationBody,
           timestamp: eventTs,
-          threadId: thread.threadId,
+          threadId: threadRootId,
         });
       }
     } else {
@@ -378,9 +379,9 @@ export async function resolveMatrixIngressContent(config: {
         eventId: messageId,
         senderId,
         body: participationBody,
+        trustedEnhancedFinal,
         accountId,
-        isDirectMessage,
-        threadId: thread.threadId,
+        threadId: threadRootId,
         eventTs,
       });
       enhancedTurnTakingEligible = participation.eligible;

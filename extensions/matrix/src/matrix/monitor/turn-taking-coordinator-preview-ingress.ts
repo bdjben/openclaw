@@ -281,6 +281,7 @@ export function createMatrixPreviewIngress(input: {
           body: typeof promoted.content.body === "string" ? promoted.content.body : "",
           timestamp: promoted.origin_server_ts,
           threadId: marker.threadId,
+          triggerEventId: marker.triggerEventId,
         }) !== undefined
       );
     }
@@ -322,18 +323,17 @@ export function createMatrixPreviewIngress(input: {
     if (!senderId) {
       return { kind: "ordinary" };
     }
-    const result = await participation.resolveCandidates({
+    const result = await participation.resolveRoster({
       cfg: params.cfg,
       roomId: params.roomId,
       accountId: params.accountId,
       senderId,
-      isDirectMessage: false,
       eventTs: params.event.origin_server_ts,
     });
-    const trusted = result.candidates.some(
+    const trusted = result.members.some(
       (candidate) => normalizeUserId(candidate.userId) === normalizeUserId(senderId),
     );
-    if (result.candidates.length < 2) {
+    if (result.members.length < 2) {
       return { kind: "consume", reason: "enhanced preview room is no longer eligible" };
     }
     if (!trusted) {

@@ -14,6 +14,7 @@ import type { MatrixTurnTakingState } from "./turn-taking-coordinator-state.js";
 import type {
   JournalEntry,
   MatrixTurnTakingFreshnessEntry,
+  MatrixReceiverView,
 } from "./turn-taking-coordinator-types.js";
 import {
   boundedMapSet,
@@ -147,6 +148,7 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
     body: string;
     timestamp?: number;
     threadId?: string;
+    triggerEventId?: string;
     sequence?: number;
     kind?: JournalEntry["kind"];
     state?: JournalEntry["state"];
@@ -169,6 +171,7 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
       existing.serverTimestamp = input.timestamp ?? existing.serverTimestamp;
       existing.kind = input.kind ?? existing.kind;
       existing.state = input.state ?? existing.state;
+      existing.triggerEventId = input.triggerEventId ?? existing.triggerEventId;
       state.rememberObservedIngress(input.roomId, eventId);
       state.settlePendingIngressForEvent(input.roomId, eventId);
       return existing.sequence;
@@ -179,6 +182,7 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
       eventId,
       senderId: input.senderId,
       body: truncateUtf16Safe(body, MAX_JOURNAL_BODY_CHARS),
+      triggerEventId: input.triggerEventId,
       observedAt: state.now(),
       kind: input.kind ?? "message",
       state: input.state ?? "final",
@@ -209,6 +213,7 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
           ? "[Sibling agent preview was redacted]"
           : "[Sibling agent preview was withdrawn]",
       threadId: input.marker.threadId,
+      triggerEventId: input.marker.triggerEventId,
       kind: input.marker.kind,
       state: input.state,
     });
@@ -233,18 +238,30 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
   const readFreshness = (input: {
     roomId: string;
     threadId?: string;
+    triggerEventId?: string;
     afterSequence: number;
     excludeSenderId?: string;
     excludeEventId?: string;
     includeActivePreviewResponseIds?: ReadonlySet<string>;
+    view: Pick<MatrixReceiverView, "includesContext">;
   }): { highWater: number; entries: MatrixTurnTakingFreshnessEntry[] } => {
     state.prune();
-    const entries: MatrixTurnTakingFreshnessEntry[] = (
-      state.roomJournal.get(state.journalScope(input.roomId, input.threadId)) ?? []
-    )
+    const scope = state.journalScope(input.roomId, input.threadId);
+    const roomPrefix = `${state.roomScope(input.roomId)}\u0000`;
+    // Reply settings can put siblings' answers in different native threads.
+    // Cross-thread context requires the exact recorded trigger, never a route guess.
+    const entries: MatrixTurnTakingFreshnessEntry[] = [...state.roomJournal]
+      .flatMap(([entryScope, journal]) =>
+        entryScope === scope
+          ? journal
+          : input.triggerEventId && entryScope.startsWith(roomPrefix)
+            ? journal.filter((entry) => entry.triggerEventId === input.triggerEventId)
+            : [],
+      )
       .filter(
         (entry) =>
           entry.sequence > input.afterSequence &&
+          input.view.includesContext(entry.senderId) &&
           entry.eventId !== input.excludeEventId &&
           (!input.excludeSenderId ||
             normalizeUserId(entry.senderId) !== normalizeUserId(input.excludeSenderId)),
@@ -261,7 +278,9 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
     for (const preview of state.authorizedActivePreviews.values()) {
       if (
         preview.roomId !== input.roomId ||
-        (preview.threadId?.trim() || undefined) !== (input.threadId?.trim() || undefined) ||
+        !input.view.includesContext(preview.senderId) ||
+        ((preview.threadId?.trim() || undefined) !== (input.threadId?.trim() || undefined) &&
+          preview.marker.triggerEventId !== input.triggerEventId) ||
         (preview.sequence <= input.afterSequence &&
           !input.includeActivePreviewResponseIds?.has(preview.marker.responseId)) ||
         (input.excludeSenderId &&
@@ -276,6 +295,8 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
         body: truncateUtf16Safe(preview.body, 2_000),
         kind: preview.marker.kind,
         state: "in-progress",
+        responseId: preview.marker.responseId,
+        revision: preview.marker.revision,
         ...(preview.serverTimestamp !== undefined ? { timestamp: preview.serverTimestamp } : {}),
       });
     }
@@ -285,12 +306,14 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
 
   const createFreshnessGate = (input: {
     cfg: CoreConfig;
+    accountId: string;
     agentId: string;
     roomId: string;
     threadId?: string;
     selfUserId: string;
     baselineSequence: number;
     triggerEventId: string;
+    triggerSenderId: string;
     triggerRequest?: string;
     initialActivePreviewResponseIds?: readonly string[];
     onDiscardAccepted?: (capability: MatrixSourceCleanupCapability) => Promise<void> | void;
@@ -301,6 +324,7 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
     if (resolved.redraftDepth === 0) {
       return undefined;
     }
+    const receiverMonitor = state.monitors.get(input.accountId);
     let cursor = input.baselineSequence;
     let acceptedRedrafts = 0;
     let discarded = false;
@@ -308,6 +332,7 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
     const decideWithUtility = async (paramsLocal: {
       lastAssistantMessage: string;
       entries: MatrixTurnTakingFreshnessEntry[];
+      view: MatrixReceiverView;
     }): Promise<"redraft" | "discard" | "send-as-is"> => {
       try {
         const prepared = await prepareSimpleCompletionModelForAgent({
@@ -319,6 +344,9 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
         });
         if ("error" in prepared) {
           input.log(`matrix turn-taking next-step model unavailable: ${prepared.error}`);
+          return "send-as-is";
+        }
+        if (!paramsLocal.view.isCurrent()) {
           return "send-as-is";
         }
         const completion = await completeWithPreparedSimpleCompletionModel({
@@ -366,20 +394,41 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
       }
     };
     return async (event) => {
-      if (discarded || acceptedRedrafts >= resolved.redraftDepth) {
+      if (
+        discarded ||
+        acceptedRedrafts >= resolved.redraftDepth ||
+        !receiverMonitor ||
+        state.monitors.get(input.accountId) !== receiverMonitor
+      ) {
         return { action: "continue" };
       }
       await new Promise<void>((resolve) => {
         setTimeout(resolve, FRESHNESS_DEBOUNCE_MS);
       });
+      // Shared transport observations are not receiver authorization. Resolve the
+      // receiver's canonical policy before every model-visible snapshot.
+      const view = await state.prepareReceiverView(input.accountId, {
+        roomId: input.roomId,
+        senderId: input.triggerSenderId,
+        eventId: input.triggerEventId,
+        threadId: input.threadId,
+      });
+      if (!view || state.monitors.get(input.accountId) !== receiverMonitor) {
+        input.log(
+          `matrix turn-taking freshness receiver unavailable account=${input.accountId} room=${input.roomId}`,
+        );
+        return { action: "continue" };
+      }
       const snapshot = await captureAfterPendingIngress({
         roomId: input.roomId,
         excludeSenderId: input.selfUserId,
         log: input.log,
         read: () =>
           readFreshness({
+            view,
             roomId: input.roomId,
             threadId: input.threadId,
+            triggerEventId: input.triggerEventId,
             afterSequence: cursor,
             excludeSenderId: input.selfUserId,
             excludeEventId: input.triggerEventId,
@@ -389,10 +438,14 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
       if (snapshot.entries.length === 0) {
         return { action: "continue" };
       }
+      if (!view.isCurrent()) {
+        return { action: "continue" };
+      }
       let action =
         resolved.nextStep.decider === "user"
           ? resolved.nextStep.action
           : await decideWithUtility({
+              view,
               lastAssistantMessage: event.lastAssistantMessage,
               entries: snapshot.entries,
             });
@@ -404,8 +457,10 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
           log: input.log,
           read: () =>
             readFreshness({
+              view,
               roomId: input.roomId,
               threadId: input.threadId,
+              triggerEventId: input.triggerEventId,
               afterSequence: snapshot.highWater,
               excludeSenderId: input.selfUserId,
               excludeEventId: input.triggerEventId,
@@ -417,10 +472,14 @@ export function createMatrixTurnTakingFreshness(state: MatrixTurnTakingState) {
             .slice(-16);
           decidedSnapshot = { highWater: activityDuringDecision.highWater, entries: mergedEntries };
           action = await decideWithUtility({
+            view,
             lastAssistantMessage: event.lastAssistantMessage,
             entries: mergedEntries,
           });
         }
+      }
+      if (!view.isCurrent()) {
+        return { action: "continue" };
       }
       if (action === "send-as-is") {
         return { action: "continue" };

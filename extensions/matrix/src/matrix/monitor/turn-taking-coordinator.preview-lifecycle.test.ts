@@ -14,9 +14,93 @@ const completionMocks = getTurnTakingCoordinatorCompletionMocks();
 beforeEach(resetTurnTakingCoordinatorTestMocks);
 
 describe("Matrix turn-taking coordinator: preview lifecycle", () => {
+  it("correlates sibling replies across reply-thread settings only for their recorded trigger", async () => {
+    const coordinator = createMatrixTurnTakingCoordinator();
+    const roomId = "!reply-routes:example.org";
+    const getJoinedRoomMembers = vi.fn(async () => ["@alpha:example.org", "@beta:example.org"]);
+    for (const accountId of ["alpha", "beta"]) {
+      register(coordinator, {
+        accountId,
+        userId: `@${accountId}:example.org`,
+        getJoinedRoomMembers,
+      });
+    }
+    const query = {
+      roomId,
+      triggerEventId: "$trigger",
+      afterSequence: 0,
+      view: { includesContext: () => true },
+    };
+    for (const triggerEventId of ["$trigger", "$unrelated"]) {
+      const marker = {
+        ...baseMarker,
+        triggerEventId,
+        threadId: triggerEventId,
+        responseId: triggerEventId,
+      };
+      const root = protocolRoot(
+        marker,
+        `${triggerEventId}-preview`,
+        `answer for ${triggerEventId}`,
+      );
+      root.content["m.relates_to"] = { rel_type: "m.thread", event_id: triggerEventId };
+      const preview = await coordinator.interceptPreviewEvent({
+        cfg: {} as never,
+        roomId,
+        accountId: "beta",
+        event: root,
+      });
+      if (preview.kind !== "authorize") {
+        throw new Error("expected threaded preview");
+      }
+      await coordinator.authorizePreviewObservation({
+        roomId,
+        accountId: "beta",
+        observationId: preview.observationId,
+      });
+    }
+    expect(coordinator.readFreshness(query).entries.map((entry) => entry.body)).toEqual([
+      "answer for $trigger",
+    ]);
+    const finalMarker = {
+      ...baseMarker,
+      responseId: "$trigger",
+      threadId: "$trigger",
+      state: "final" as const,
+      partIndex: 0,
+      partCount: 1,
+    };
+    const final = protocolRoot(finalMarker, "$standalone-final", "final answer for trigger");
+    final.content["m.relates_to"] = { rel_type: "m.thread", event_id: "$trigger" };
+    const promoted = await coordinator.interceptPreviewEvent({
+      cfg: {} as never,
+      roomId,
+      accountId: "beta",
+      event: final,
+    });
+    if (promoted.kind !== "promote") {
+      throw new Error("expected threaded final");
+    }
+    await coordinator.authorizePreviewObservation({
+      roomId,
+      accountId: "beta",
+      observationId: promoted.observationId,
+    });
+    const activity = coordinator.readFreshness(query).entries;
+    expect(activity).toContainEqual(expect.objectContaining({ body: "final answer for trigger" }));
+    expect(activity).not.toContainEqual(expect.objectContaining({ body: "answer for $unrelated" }));
+    expect(
+      coordinator.readFreshness({ ...query, view: { includesContext: () => false } }).entries,
+    ).toEqual([]);
+  });
+
   it("suppresses partials and promotes one authenticated final on the preview root", async () => {
     const coordinator = createMatrixTurnTakingCoordinator();
-    const getJoinedRoomMembers = vi.fn(async () => ["@alpha:example.org", "@beta:example.org"]);
+    const getJoinedRoomMembers = vi.fn(async () => [
+      "@alpha:example.org",
+      "@beta:example.org",
+      "@gamma:example.org",
+    ]);
     register(coordinator, {
       accountId: "alpha",
       userId: "@alpha:example.org",
@@ -29,6 +113,11 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       getEvent: vi.fn(async () => protocolRoot()),
     });
 
+    register(coordinator, {
+      accountId: "gamma",
+      userId: "@gamma:example.org",
+      getJoinedRoomMembers,
+    });
     const preview = await coordinator.interceptPreviewEvent({
       cfg: {} as never,
       roomId: "!room:example.org",
@@ -37,7 +126,11 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     });
     expect(preview).toMatchObject({ kind: "authorize" });
     expect(
-      coordinator.readFreshness({ roomId: "!room:example.org", afterSequence: 0 }).entries,
+      coordinator.readFreshness({
+        view: { includesContext: () => true },
+        roomId: "!room:example.org",
+        afterSequence: 0,
+      }).entries,
     ).toEqual([]);
     if (preview.kind !== "authorize") {
       throw new Error("expected receiver-authorizable preview");
@@ -50,8 +143,31 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       }),
     ).resolves.toBe(true);
     expect(
-      coordinator.readFreshness({ roomId: "!room:example.org", afterSequence: 0 }).entries,
+      coordinator.readFreshness({
+        view: { includesContext: () => true },
+        roomId: "!room:example.org",
+        afterSequence: 0,
+      }).entries,
     ).toContainEqual(expect.objectContaining({ body: "partial", state: "in-progress" }));
+    const sequence = coordinator.currentSequence();
+    const siblingObservation = await coordinator.interceptPreviewEvent({
+      cfg: {} as never,
+      roomId: "!room:example.org",
+      accountId: "gamma",
+      event: protocolRoot(),
+    });
+    expect(siblingObservation.kind).toBe("authorize");
+    if (siblingObservation.kind !== "authorize") {
+      throw new Error("expected second receiver observation");
+    }
+    await expect(
+      coordinator.authorizePreviewObservation({
+        roomId: "!room:example.org",
+        accountId: "gamma",
+        observationId: siblingObservation.observationId,
+      }),
+    ).resolves.toBe(true);
+    expect(coordinator.currentSequence()).toBe(sequence);
     const finalMarker = { ...baseMarker, state: "final" as const, revision: 1 };
     await expect(
       coordinator.interceptPreviewEvent({
@@ -116,6 +232,7 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
 
     expect(
       coordinator.readFreshness({
+        view: { includesContext: () => true },
         roomId: "!private-transport:example.org",
         afterSequence: 0,
       }).entries,
@@ -128,7 +245,6 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       senderId: "@human:example.org",
       body: "question",
       accountId: "beta",
-      isDirectMessage: false,
     });
     const classifierCall = completionMocks.complete.mock.calls.at(-1)?.[0] as {
       context: { messages: Array<{ content: string }> };
@@ -178,7 +294,10 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       event: protocolRoot(marker, "$sender-root", "sender-first root"),
     });
     expect(root.kind).toBe("authorize");
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toEqual([]);
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toEqual([]);
     if (root.kind !== "authorize") {
       throw new Error("expected exact sender-first root authorization");
     }
@@ -189,9 +308,10 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
         observationId: root.observationId,
       }),
     ).resolves.toBe(true);
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toContainEqual(
-      expect.objectContaining({ body: "sender-first root", state: "in-progress" }),
-    );
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toContainEqual(expect.objectContaining({ body: "sender-first root", state: "in-progress" }));
 
     const updateMarker = { ...marker, revision: 1 };
     await coordinator.observeOutboundPreview({
@@ -210,7 +330,9 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     });
     expect(update.kind).toBe("authorize");
     expect(
-      coordinator.readFreshness({ roomId, afterSequence: 0 }).entries.map((entry) => entry.body),
+      coordinator
+        .readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries.map((entry) => entry.body),
     ).toEqual(["sender-first root"]);
     if (update.kind !== "authorize") {
       throw new Error("expected exact sender-first update authorization");
@@ -222,7 +344,10 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
         observationId: update.observationId,
       }),
     ).resolves.toBe(true);
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toContainEqual(
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toContainEqual(
       expect.objectContaining({ body: "sender-first update", state: "in-progress" }),
     );
 
@@ -248,7 +373,7 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     });
     expect(deniedUpdate.kind).toBe("authorize");
     const visibleBodies = coordinator
-      .readFreshness({ roomId, afterSequence: 0 })
+      .readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
       .entries.map((entry) => entry.body);
     expect(visibleBodies).toContain("sender-first update");
     expect(visibleBodies).not.toContain("withheld sender-first update");
@@ -272,7 +397,7 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       }),
     ).resolves.toBe(false);
     const afterLateAuthorization = coordinator
-      .readFreshness({ roomId, afterSequence: 0 })
+      .readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
       .entries.map((entry) => entry.body);
     expect(afterLateAuthorization).toContain("sender-first update");
     expect(afterLateAuthorization).not.toContain("withheld sender-first update");
@@ -375,7 +500,10 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
         }),
       ).resolves.toEqual({ kind: "consume", reason: "invalid or stale preview lineage" });
     }
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toEqual([]);
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toEqual([]);
   });
 
   it("retains the last authorized preview until the exact final passes receiver access", async () => {
@@ -428,7 +556,11 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     });
     expect(deniedUpdate.kind).toBe("authorize");
     const freshnessBodies = coordinator
-      .readFreshness({ roomId: "!exact-authorization:example.org", afterSequence: 0 })
+      .readFreshness({
+        view: { includesContext: () => true },
+        roomId: "!exact-authorization:example.org",
+        afterSequence: 0,
+      })
       .entries.map((entry) => entry.body);
     expect(freshnessBodies).toContain("allowed revision zero");
     expect(freshnessBodies).not.toContain("denied revision one");
@@ -440,7 +572,6 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       senderId: "@human:example.org",
       body: "who is active?",
       accountId: "beta",
-      isDirectMessage: false,
     });
     const classifierCall = completionMocks.complete.mock.calls.at(-1)?.[0] as {
       context: { messages: Array<{ content: string }> };
@@ -463,7 +594,11 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     });
     expect(
       coordinator
-        .readFreshness({ roomId: "!exact-authorization:example.org", afterSequence: 0 })
+        .readFreshness({
+          view: { includesContext: () => true },
+          roomId: "!exact-authorization:example.org",
+          afterSequence: 0,
+        })
         .entries.map((entry) => entry.body),
     ).toContain("allowed revision zero");
 
@@ -477,7 +612,11 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     // Interception precedes the handler's normal Matrix access check. Leaving
     // this prepared terminal unauthorized models that check denying it.
     const afterDeniedFinal = coordinator
-      .readFreshness({ roomId: "!exact-authorization:example.org", afterSequence: 0 })
+      .readFreshness({
+        view: { includesContext: () => true },
+        roomId: "!exact-authorization:example.org",
+        afterSequence: 0,
+      })
       .entries.map((entry) => entry.body);
     expect(afterDeniedFinal).toContain("allowed revision zero");
     expect(afterDeniedFinal).not.toContain("denied final body");
@@ -488,7 +627,6 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       senderId: "@human:example.org",
       body: "what remains visible?",
       accountId: "beta",
-      isDirectMessage: false,
     });
     const postFinalClassifierCall = completionMocks.complete.mock.calls.at(-1)?.[0] as {
       context: { messages: Array<{ content: string }> };
@@ -519,6 +657,7 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       }),
     ).resolves.toBe(true);
     const afterAllowedFinal = coordinator.readFreshness({
+      view: { includesContext: () => true },
       roomId: "!exact-authorization:example.org",
       afterSequence: 0,
     }).entries;
@@ -541,7 +680,11 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     ).resolves.toBe(false);
     expect(
       coordinator
-        .readFreshness({ roomId: "!exact-authorization:example.org", afterSequence: 0 })
+        .readFreshness({
+          view: { includesContext: () => true },
+          roomId: "!exact-authorization:example.org",
+          afterSequence: 0,
+        })
         .entries.map((entry) => entry.body),
     ).not.toContain("denied revision one");
   });
@@ -590,12 +733,16 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     expect(deniedAbandoned.kind).toBe("authorize");
     // Do not authorize yet: this is the state after normal Matrix access has
     // rejected the terminal frame.
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toContainEqual(
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toContainEqual(
       expect.objectContaining({ body: "authorized work in progress", state: "in-progress" }),
     );
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).not.toContainEqual(
-      expect.objectContaining({ state: "abandoned" }),
-    );
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).not.toContainEqual(expect.objectContaining({ state: "abandoned" }));
 
     if (deniedAbandoned.kind !== "authorize") {
       throw new Error("expected receiver-authorizable abandoned frame");
@@ -608,6 +755,7 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       }),
     ).resolves.toBe(true);
     const afterAllowedAbandoned = coordinator.readFreshness({
+      view: { includesContext: () => true },
       roomId,
       afterSequence: 0,
     }).entries;
@@ -670,7 +818,11 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
     await expect(
       coordinator.observePreviewRedaction({ roomId, targetEventId: "$redacted-root" }),
     ).resolves.toBe(true);
-    const afterRedaction = coordinator.readFreshness({ roomId, afterSequence: 0 }).entries;
+    const afterRedaction = coordinator.readFreshness({
+      view: { includesContext: () => true },
+      roomId,
+      afterSequence: 0,
+    }).entries;
     expect(afterRedaction).not.toContainEqual(
       expect.objectContaining({ body: "authorized before redaction", state: "in-progress" }),
     );
@@ -689,7 +841,9 @@ describe("Matrix turn-taking coordinator: preview lifecycle", () => {
       }),
     ).resolves.toBe(false);
     expect(
-      coordinator.readFreshness({ roomId, afterSequence: 0 }).entries.map((entry) => entry.body),
+      coordinator
+        .readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries.map((entry) => entry.body),
     ).not.toContain("unauthorized update before redaction");
   });
 });

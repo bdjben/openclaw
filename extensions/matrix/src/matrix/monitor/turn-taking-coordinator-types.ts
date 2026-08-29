@@ -35,17 +35,20 @@ export const MAX_OBSERVED_INGRESS_EVENTS = 4_000;
 
 export type MatrixParticipationDisposition = "strongly-speak" | "strongly-silent" | "neutral";
 
-export type MatrixTurnTakingCandidate = {
+export type MatrixTurnTakingMember = {
   accountId: string;
-  agentId: string;
   userId: string;
+};
+
+export type MatrixTurnTakingCandidate = MatrixTurnTakingMember & {
+  agentId: string;
   name?: string;
   aliases: string[];
 };
 
 export type MatrixTurnTakingEligibility = {
   eligible: boolean;
-  candidates: MatrixTurnTakingCandidate[];
+  members: MatrixTurnTakingMember[];
   ownerAccountId?: string;
 };
 
@@ -62,6 +65,26 @@ export type RegisteredMonitor = {
   client: MatrixClient;
   core: PluginRuntime;
   log: (message: string) => void;
+  prepareAccess?: (input: MatrixReceiverAccessInput) => Promise<MatrixReceiverAccess>;
+};
+
+export type MatrixReceiverAccessInput = {
+  roomId: string;
+  senderId: string;
+  eventId?: string;
+  threadId?: string;
+  eventTs?: number;
+  trustedEnhancedFinal?: boolean;
+};
+
+export type MatrixReceiverAccess = {
+  agentId: string;
+  canParticipate: boolean;
+  includesContext: (senderId: string) => boolean;
+};
+
+export type MatrixReceiverView = MatrixReceiverAccess & {
+  isCurrent: () => boolean;
 };
 
 export type RoomMembership = {
@@ -75,6 +98,7 @@ export type JournalEntry = {
   eventId: string;
   senderId: string;
   body: string;
+  triggerEventId?: string;
   observedAt: number;
   serverTimestamp?: number;
   kind: "message" | "answer" | "progress";
@@ -181,20 +205,21 @@ export type MatrixTurnTakingFreshnessEntry = {
   kind: "message" | "answer" | "progress";
   state: "final" | "in-progress" | "abandoned" | "redacted";
   timestamp?: number;
+  responseId?: string;
+  revision?: number;
 };
 
-export type CandidateResolution = {
-  candidates: MatrixTurnTakingCandidate[];
+export type MatrixRosterResolution = {
+  members: MatrixTurnTakingMember[];
   executionMonitor?: RegisteredMonitor;
 };
 
 export type CachedDecision = {
   expiresAt: number;
   pending: Promise<{
-    candidates: MatrixTurnTakingCandidate[];
+    members: MatrixTurnTakingMember[];
     ownerAccountId?: string;
     baselineSequence?: number;
-    initialActivePreviewResponseIds?: string[];
     dispositions: Map<string, MatrixParticipationDisposition>;
   }>;
 };
@@ -325,7 +350,7 @@ export function parseClassifierOutput(
 }
 
 export function neutralDispositions(
-  candidates: readonly MatrixTurnTakingCandidate[],
+  candidates: readonly Pick<MatrixTurnTakingMember, "accountId">[],
 ): Map<string, MatrixParticipationDisposition> {
   return new Map(candidates.map((candidate) => [candidate.accountId, "neutral"] as const));
 }

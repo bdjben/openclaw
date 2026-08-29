@@ -1,15 +1,161 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  createMatrixTurnTakingCoordinator,
+  createMatrixTurnTakingCoordinator as createCoordinator,
+  register,
   getTurnTakingCoordinatorCompletionMocks,
   resetTurnTakingCoordinatorTestMocks,
 } from "./turn-taking-coordinator.test-fixtures.js";
 
+function createMatrixTurnTakingCoordinator() {
+  const coordinator = createCoordinator();
+  register(coordinator, {
+    accountId: "alpha",
+    userId: "@alpha:example.org",
+    getJoinedRoomMembers: vi.fn(async () => ["@alpha:example.org"]),
+  });
+  return coordinator;
+}
+
 const completionMocks = getTurnTakingCoordinatorCompletionMocks();
 
 beforeEach(resetTurnTakingCoordinatorTestMocks);
+afterEach(() => vi.useRealTimers());
 
 describe("Matrix turn-taking coordinator: freshness", () => {
+  it.each(["retired", "replaced"] as const)(
+    "withholds context when the receiver is %s during access preparation",
+    async (lifecycle) => {
+      vi.useFakeTimers();
+      const coordinator = createMatrixTurnTakingCoordinator();
+      const joined = vi.fn(async () => ["@alpha:example.org", "@beta:example.org"]);
+      register(coordinator, {
+        accountId: "beta",
+        userId: "@beta:example.org",
+        getJoinedRoomMembers: joined,
+      });
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const prepareAccess = vi.fn(async () => {
+        await hold;
+        return {
+          agentId: "agent-alpha",
+          isDirectMessage: false,
+          canParticipate: true,
+          includesContext: () => true,
+        };
+      });
+      const retire = register(coordinator, {
+        accountId: "alpha",
+        userId: "@alpha:example.org",
+        getJoinedRoomMembers: joined,
+        prepareAccess,
+      });
+      coordinator.observeMessage({
+        roomId: "!lifecycle:example.org",
+        eventId: "$newer",
+        senderId: "@beta:example.org",
+        body: "private sibling update",
+      });
+      const gate = coordinator.createFreshnessGate({
+        cfg: {} as never,
+        accountId: "alpha",
+        agentId: "agent-alpha",
+        roomId: "!lifecycle:example.org",
+        selfUserId: "@alpha:example.org",
+        triggerSenderId: "@human:example.org",
+        triggerEventId: "$trigger",
+        baselineSequence: 0,
+        config: { enabled: true, redraftDepth: 1, nextStep: { decider: "ai" } },
+        log: vi.fn(),
+      })!;
+      const pending = gate({
+        runId: "run",
+        sessionId: "session",
+        provider: "full",
+        model: "full-model",
+        lastAssistantMessage: "draft",
+        revisionAttempt: 0,
+      });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(prepareAccess).toHaveBeenCalledOnce();
+      if (lifecycle === "retired") {
+        retire();
+      } else {
+        register(coordinator, {
+          accountId: "alpha",
+          userId: "@alpha:example.org",
+          getJoinedRoomMembers: joined,
+        });
+      }
+      release();
+      await expect(pending).resolves.toEqual({ action: "continue" });
+      expect(completionMocks.prepare).not.toHaveBeenCalled();
+      expect(completionMocks.complete).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refreshes the receiver policy before a second freshness snapshot", async () => {
+    vi.useFakeTimers();
+    const coordinator = createMatrixTurnTakingCoordinator();
+    let includesSibling = true;
+    const prepareAccess = vi.fn(async () => {
+      const permitted = includesSibling;
+      return {
+        agentId: "agent-alpha",
+        isDirectMessage: false,
+        canParticipate: true,
+        includesContext: () => permitted,
+      };
+    });
+    coordinator.configureMonitorAccess("alpha", prepareAccess);
+    const gate = coordinator.createFreshnessGate({
+      cfg: {} as never,
+      accountId: "alpha",
+      agentId: "agent-alpha",
+      roomId: "!policy:example.org",
+      selfUserId: "@alpha:example.org",
+      triggerSenderId: "@human:example.org",
+      triggerEventId: "$trigger",
+      baselineSequence: 0,
+      config: { enabled: true, redraftDepth: 2, nextStep: { decider: "user", action: "redraft" } },
+      log: vi.fn(),
+    })!;
+    const finalize = () =>
+      gate({
+        runId: "run",
+        sessionId: "session",
+        provider: "full",
+        model: "full-model",
+        lastAssistantMessage: "draft",
+        revisionAttempt: 0,
+      });
+    coordinator.observeMessage({
+      roomId: "!policy:example.org",
+      eventId: "$first",
+      senderId: "@beta:example.org",
+      body: "allowed update",
+    });
+    const first = finalize();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(first).resolves.toMatchObject({
+      action: "revise",
+      instruction: expect.stringContaining("allowed update"),
+    });
+    includesSibling = false;
+    coordinator.observeMessage({
+      roomId: "!policy:example.org",
+      eventId: "$second",
+      senderId: "@beta:example.org",
+      body: "now excluded",
+    });
+    const second = finalize();
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(second).resolves.toEqual({ action: "continue" });
+    expect(prepareAccess).toHaveBeenCalledTimes(2);
+  });
+
   it("rechecks room activity that arrives while the AI next-step decision is pending", async () => {
     vi.useFakeTimers();
     try {
@@ -37,6 +183,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
         )
         .mockResolvedValueOnce({ text: '{"action":"redraft"}' });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!decision-race:example.org",
@@ -101,6 +249,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
         accountId: "alpha",
       });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!delayed-ingress:example.org",
@@ -157,6 +307,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
         accountId: "beta",
       });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!dropped-ingress:example.org",
@@ -194,6 +346,7 @@ describe("Matrix turn-taking coordinator: freshness", () => {
       expect(completionMocks.complete).not.toHaveBeenCalled();
       expect(
         coordinator.readFreshness({
+          view: { includesContext: () => true },
           roomId: "!dropped-ingress:example.org",
           afterSequence: 0,
         }).entries,
@@ -216,6 +369,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
         }),
       );
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!six-monitors:example.org",
@@ -263,6 +418,7 @@ describe("Matrix turn-taking coordinator: freshness", () => {
       expect(completionMocks.complete).not.toHaveBeenCalled();
       expect(
         coordinator.readFreshness({
+          view: { includesContext: () => true },
           roomId: "!six-monitors:example.org",
           threadId: "$thread-b",
           afterSequence: 0,
@@ -290,6 +446,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
         accountId: "late-monitor",
       });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!late-monitor:example.org",
@@ -339,6 +497,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
       });
       const log = vi.fn();
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!wedged-ingress:example.org",
@@ -392,6 +552,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
         accountId: "beta",
       });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!self-ingress:example.org",
@@ -450,6 +612,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
       expect(coordinator.currentSequence()).toBe(2);
 
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!control-replay:example.org",
@@ -486,6 +650,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
     const coordinator = createMatrixTurnTakingCoordinator();
     expect(
       coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!room:example.org",
@@ -517,6 +683,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
       });
       completionMocks.complete.mockResolvedValue({ text: "not strict JSON" });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!next-step:example.org",
@@ -584,6 +752,8 @@ describe("Matrix turn-taking coordinator: freshness", () => {
       completionMocks.complete.mockResolvedValue({ text: '{"action":"discard"}' });
       const onDiscardAccepted = vi.fn();
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!fruit:example.org",

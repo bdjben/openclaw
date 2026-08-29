@@ -55,12 +55,18 @@ describe("Matrix turn-taking coordinator: preview security", () => {
       marker: { ...marker, state: "final", revision: 1 },
       body: "terminal awaiting access",
     });
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toContainEqual(
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toContainEqual(
       expect.objectContaining({ body: "authorized until timeout", state: "in-progress" }),
     );
 
     timestamp += MATRIX_ACTIVE_PREVIEW_TTL_MS + 1;
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toEqual([]);
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toEqual([]);
   });
 
   it("rejects an in-progress authorization that completes after its absolute source deadline", async () => {
@@ -108,7 +114,10 @@ describe("Matrix turn-taking coordinator: preview security", () => {
         observationId: prepared.observationId,
       }),
     ).resolves.toBe(false);
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toEqual([]);
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toEqual([]);
   });
 
   it("rejects terminal authorization after the source replay deadline or prepared-cache deadline", async () => {
@@ -169,7 +178,11 @@ describe("Matrix turn-taking coordinator: preview security", () => {
         }),
       ).resolves.toBe(false);
       expect(
-        coordinator.readFreshness({ roomId: scenario.roomId, afterSequence: 0 }).entries,
+        coordinator.readFreshness({
+          view: { includesContext: () => true },
+          roomId: scenario.roomId,
+          afterSequence: 0,
+        }).entries,
       ).toEqual([]);
     }
   });
@@ -200,7 +213,10 @@ describe("Matrix turn-taking coordinator: preview security", () => {
         event: protocolRoot(baseMarker, "$redacted-before-root", "must stay redacted"),
       }),
     ).resolves.toEqual({ kind: "consume", reason: "preview source was already redacted" });
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toEqual([]);
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toEqual([]);
   });
 
   it("keeps an overtaking redaction authoritative while membership resolution is pending", async () => {
@@ -239,7 +255,10 @@ describe("Matrix turn-taking coordinator: preview security", () => {
       kind: "consume",
       reason: "preview source was already redacted",
     });
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toEqual([]);
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toEqual([]);
   });
 
   it("fails redaction overflow closed only in the room whose record was evicted", async () => {
@@ -476,6 +495,7 @@ describe("Matrix turn-taking coordinator: preview security", () => {
       }),
     ).resolves.toMatchObject({ kind: "consume" });
     const freshness = coordinator.readFreshness({
+      view: { includesContext: () => true },
       roomId: "!room:example.org",
       afterSequence: 0,
     });
@@ -539,6 +559,7 @@ describe("Matrix turn-taking coordinator: preview security", () => {
       }),
     ).resolves.toBe(true);
     const freshness = coordinator.readFreshness({
+      view: { includesContext: () => true },
       roomId: "!completed-0:example.org",
       afterSequence: 0,
     });
@@ -582,7 +603,6 @@ describe("Matrix turn-taking coordinator: preview security", () => {
         senderId: "@human:example.org",
         body: "question",
         accountId: "alpha",
-        isDirectMessage: false,
       });
       await vi.waitFor(() => expect(joined).toHaveBeenCalled());
       await coordinator.observeOutboundPreview({
@@ -620,6 +640,8 @@ describe("Matrix turn-taking coordinator: preview security", () => {
         observationId: previewIngress.observationId,
       });
       const gate = coordinator.createFreshnessGate({
+        accountId: "alpha",
+        triggerSenderId: "@human:example.org",
         cfg: {} as never,
         agentId: "agent-alpha",
         roomId: "!race:example.org",

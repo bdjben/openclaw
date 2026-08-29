@@ -16,8 +16,8 @@ import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runti
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import type { CoreConfig, MatrixRoomConfig } from "../../types.js";
 import type { MatrixClient } from "../sdk.js";
+import { createMatrixContextVisibility } from "./access-state.js";
 import { resolveMatrixAckReactionConfig } from "./ack-config.js";
-import { resolveMatrixAllowListMatch } from "./allowlist.js";
 import { resolveMatrixSharedDmContextNotice } from "./handler-helpers.js";
 import { loadMatrixSendModule } from "./handler-runtime.js";
 import type { MatrixLocationPayload } from "./location.js";
@@ -138,33 +138,15 @@ export async function resolveMatrixInboundContext(config: {
 
   const replyToEventId = resolveMatrixReplyToEventId(event.content as RoomMessageEventContent);
   const threadTarget = thread.threadId;
-  const isRoomContextSenderAllowed = (contextSenderId?: string): boolean => {
-    if (!isRoom || !contextSenderId) {
-      return true;
-    }
-    if (effectiveRoomUsers.length > 0) {
-      return resolveMatrixAllowListMatch({
-        allowList: effectiveRoomUsers,
-        userId: contextSenderId,
-      }).allowed;
-    }
-    if (groupPolicy === "allowlist" && effectiveGroupAllowFrom.length > 0) {
-      return resolveMatrixAllowListMatch({
-        allowList: effectiveGroupAllowFrom,
-        userId: contextSenderId,
-      }).allowed;
-    }
-    return true;
-  };
-  const shouldIncludeRoomContextSender = (
-    kind: "thread" | "quote" | "history",
-    contextSenderId?: string,
-  ): boolean =>
-    evaluateSupplementalContextVisibility({
-      mode: contextVisibilityMode,
-      kind,
-      senderAllowed: isRoomContextSenderAllowed(contextSenderId),
-    }).include;
+  const contextVisibility = createMatrixContextVisibility({
+    isRoom,
+    groupPolicy,
+    effectiveGroupAllowFrom,
+    effectiveRoomUsers,
+    mode: contextVisibilityMode,
+  });
+  const isRoomContextSenderAllowed = contextVisibility.senderAllowed;
+  const shouldIncludeRoomContextSender = contextVisibility.include;
   let threadContext = threadRootId
     ? await resolveThreadContext({ roomId, threadRootId })
     : undefined;

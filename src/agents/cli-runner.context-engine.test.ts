@@ -1,9 +1,12 @@
 /** Tests CLI runner integration with context-engine lifecycle hooks. */
 import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildEmptyInteractiveReplyPayload } from "../auto-reply/reply/agent-runner-failure-reply.js";
 import type { ContextEngine } from "../context-engine/types.js";
 import { createTestAdmittedRunContext } from "./admitted-run-context.test-support.js";
+import * as cliAuthEpoch from "./cli-auth-epoch.js";
 import type { PreparedCliRunContext } from "./cli-runner/types.js";
+import { hasIntentionalTerminalCompletion } from "./embedded-agent-runner/result-fallback-classifier.js";
 
 const {
   executePreparedCliRunMock,
@@ -191,6 +194,7 @@ describe("runPreparedCliAgent context engine lifecycle", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     restoreCliRunnerTestDeps();
   });
 
@@ -546,34 +550,115 @@ describe("runPreparedCliAgent context engine lifecycle", () => {
     expect(JSON.stringify(result)).not.toContain("Stale tool-authored answer");
   });
 
-  it("falls back to the pre-rewrite CLI draft when a zero-tool revision cannot be prepared", async () => {
+  it.each(["preparation failure", "runtime mismatch"] as const)(
+    "falls back to the pre-rewrite CLI draft after %s without leaking prepared resources",
+    async (failure) => {
+      const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
+      const context = buildPreparedContext(createContextEngine({ afterTurn }));
+      context.params.onBeforeAgentFinalize = vi.fn(async () => ({
+        action: "revise" as const,
+        instruction: "rewrite",
+        disableTools: true as const,
+      }));
+      executePreparedCliRunMock.mockResolvedValueOnce({
+        text: "safe original",
+        rawText: "safe original",
+        sessionId: "external-cli-session-1",
+      });
+      const revisionCleanup = vi.fn(async () => {});
+      if (failure === "preparation failure") {
+        prepareCliRunContextMock.mockRejectedValueOnce(new Error("zero-tool cap unavailable"));
+      } else {
+        prepareCliRunContextMock.mockImplementationOnce(async (revisionParams) => ({
+          ...context,
+          params: { ...context.params, ...revisionParams, disableTools: true },
+          modelId: "unselected-model",
+          preparedBackend: { ...context.preparedBackend, cleanup: revisionCleanup },
+        }));
+      }
+
+      const result = await runPreparedCliAgent(context);
+
+      expect(result.payloads).toEqual([{ text: "safe original" }]);
+      expect(executePreparedCliRunMock).toHaveBeenCalledOnce();
+      expect(revisionCleanup).toHaveBeenCalledTimes(failure === "runtime mismatch" ? 1 : 0);
+      const turnMessages = afterTurn.mock.calls[0]?.[0].messages.slice(
+        afterTurn.mock.calls[0]?.[0].prePromptMessageCount,
+      );
+      expectMessageText(turnMessages?.at(-1), "safe original");
+    },
+  );
+
+  it.each(
+    (["artifact", "owner"] as const).flatMap((changedBinding) =>
+      (["revision", "gate-continue", "gate-discard", "gate-error"] as const).map((phase) => ({
+        changedBinding,
+        phase,
+      })),
+    ),
+  )(
+    "rejects a CLI final when its runtime $changedBinding changes during $phase",
+    async ({ changedBinding, phase }) => {
+      const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
+      const context = buildPreparedContext(createContextEngine({ afterTurn }));
+      context.runtimeArtifactFingerprint = "artifact-before";
+      context.runtimeOwnerFingerprint = "owner-before";
+      const readArtifact = vi
+        .spyOn(cliAuthEpoch, "resolveCliRuntimeArtifactFingerprint")
+        .mockResolvedValue("artifact-before");
+      const readOwner = vi
+        .spyOn(cliAuthEpoch, "resolveCliRuntimeOwnerFingerprint")
+        .mockResolvedValue("owner-before");
+      const changeRuntimeBinding = () => {
+        if (changedBinding === "artifact") {
+          readArtifact.mockResolvedValueOnce("artifact-after");
+        } else {
+          readOwner.mockResolvedValueOnce("owner-after");
+        }
+      };
+      context.params.onBeforeAgentFinalize = vi.fn(async () => {
+        if (phase === "revision") {
+          return {
+            action: "revise" as const,
+            instruction: "rewrite using the newer room activity",
+            disableTools: true as const,
+          };
+        }
+        await Promise.resolve();
+        changeRuntimeBinding();
+        if (phase === "gate-error") {
+          throw new Error("freshness evaluator unavailable");
+        }
+        return { action: phase === "gate-discard" ? ("discard" as const) : ("continue" as const) };
+      });
+      executePreparedCliRunMock
+        .mockResolvedValueOnce({ text: "original draft", sessionId: "external-cli-session-1" })
+        .mockImplementationOnce(async () => {
+          changeRuntimeBinding();
+          return { text: "rejected rewrite", sessionId: "external-cli-session-1" };
+        });
+      const revisionCleanup = vi.fn(async () => {});
+      prepareCliRunContextMock.mockImplementationOnce(async (revisionParams) => ({
+        ...context,
+        params: { ...context.params, ...revisionParams, disableTools: true },
+        preparedBackend: { ...context.preparedBackend, cleanup: revisionCleanup },
+        reusableCliSession: { mode: "reuse" as const, sessionId: "external-cli-session-1" },
+      }));
+
+      await expect(runPreparedCliAgent(context)).rejects.toThrow(
+        changedBinding === "artifact"
+          ? "CLI executable/package artifact changed during successful inference"
+          : "CLI runtime owner changed during successful inference",
+      );
+      expect(afterTurn).not.toHaveBeenCalled();
+      expect(revisionCleanup).toHaveBeenCalledTimes(phase === "revision" ? 1 : 0);
+    },
+  );
+
+  it("deterministically discards a CLI final without persisting the rejected assistant or triggering empty-reply recovery", async () => {
     const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
     const context = buildPreparedContext(createContextEngine({ afterTurn }));
-    context.params.onBeforeAgentFinalize = vi.fn(async () => ({
-      action: "revise" as const,
-      instruction: "rewrite",
-      disableTools: true as const,
-    }));
-    executePreparedCliRunMock.mockResolvedValueOnce({
-      text: "safe original",
-      rawText: "safe original",
-      sessionId: "external-cli-session-1",
-    });
-    prepareCliRunContextMock.mockRejectedValueOnce(new Error("zero-tool cap unavailable"));
-
-    const result = await runPreparedCliAgent(context);
-
-    expect(result.payloads).toEqual([{ text: "safe original" }]);
-    expect(executePreparedCliRunMock).toHaveBeenCalledOnce();
-    const turnMessages = afterTurn.mock.calls[0]?.[0].messages.slice(
-      afterTurn.mock.calls[0]?.[0].prePromptMessageCount,
-    );
-    expectMessageText(turnMessages?.at(-1), "safe original");
-  });
-
-  it("deterministically discards a CLI final without persisting or finalizing the rejected assistant", async () => {
-    const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
-    const context = buildPreparedContext(createContextEngine({ afterTurn }));
+    context.params.currentInboundEventKind = "user_request";
     const onAccepted = vi.fn(async () => {});
     context.params.onBeforeAgentFinalize = vi.fn(async () => ({
       action: "discard" as const,
@@ -590,6 +675,17 @@ describe("runPreparedCliAgent context engine lifecycle", () => {
     expect(result.payloads).toBeUndefined();
     expect(result.meta.finalAssistantVisibleText).toBeUndefined();
     expect(result.meta.finalAssistantRawText).toBeUndefined();
+    expect(
+      buildEmptyInteractiveReplyPayload({
+        isInteractive: true,
+        hasPendingContinuation: false,
+        hasExplicitSilentReply: false,
+        hasCommittedDelivery: false,
+        hasIntentionalTerminalCompletion: hasIntentionalTerminalCompletion(result),
+        sessionCtx: { Provider: "matrix", Surface: "matrix", ChatType: "group" },
+        cfg: { agents: { defaults: { silentReply: { group: "disallow" } } } },
+      }),
+    ).toBeUndefined();
     expect(executePreparedCliRunMock).toHaveBeenCalledOnce();
     expect(onAccepted).toHaveBeenCalledOnce();
     const turnMessages = afterTurn.mock.calls[0]?.[0].messages.slice(

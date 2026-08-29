@@ -396,7 +396,9 @@ export function createMatrixHandlerTestHarness(
     turnTaking: options.turnTaking,
     turnTakingRoomsConfig: options.turnTakingRoomsConfig,
     needsRoomAliasesForTurnTakingConfig: options.needsRoomAliasesForTurnTakingConfig,
-    turnTakingCoordinator: options.turnTakingCoordinator,
+    turnTakingCoordinator: options.turnTakingCoordinator
+      ? Object.assign({ configureMonitorAccess: vi.fn() }, options.turnTakingCoordinator)
+      : undefined,
     resolveLiveUserAllowlist: options.resolveLiveUserAllowlist,
     resolveStorePath: options.resolveStorePath ?? (() => "/tmp/session-store"),
     createChannelInboundEnvelopeBuilder,

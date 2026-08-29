@@ -294,20 +294,24 @@ function expectNoticeSent(mock: unknown) {
 function createReceiverAuthorizedTurnTakingHarness(params: {
   allowed: boolean;
   policy: "room-users" | "group-allowlist";
+  receiverAccountId?: "beta" | "gamma";
+  coordinator?: ReturnType<typeof createMatrixTurnTakingCoordinator>;
+  cfg?: unknown;
   inboundDeduper?: {
     claim: ReturnType<typeof vi.fn>;
   };
 }) {
   const roomId = "!receiver-access:example.org";
   const senderId = "@alpha:example.org";
-  const receiverId = "@beta:example.org";
+  const receiverAccountId = params.receiverAccountId ?? "beta";
+  const receiverId = `@${receiverAccountId}:example.org`;
   const allowedSender = params.allowed ? senderId : "@human:example.org";
   const roomsConfig: Record<string, { requireMention?: boolean; users?: string[] }> =
     params.policy === "room-users"
       ? { [roomId]: { requireMention: false, users: [allowedSender] } }
       : { "*": { requireMention: false } };
   const groupAllowFrom = params.policy === "group-allowlist" ? [allowedSender] : [];
-  const cfg = {
+  const cfg = params.cfg ?? {
     channels: {
       matrix: {
         turnTaking: { enabled: true },
@@ -319,7 +323,7 @@ function createReceiverAuthorizedTurnTakingHarness(params: {
             userId: senderId,
             accessToken: "alpha-token",
           },
-          beta: {
+          [receiverAccountId]: {
             homeserver: "https://matrix.example.org",
             userId: receiverId,
             accessToken: "beta-token",
@@ -328,8 +332,13 @@ function createReceiverAuthorizedTurnTakingHarness(params: {
       },
     },
   };
-  const joined = vi.fn(async () => [senderId, receiverId, "@human:example.org"]);
-  const coordinator = createMatrixTurnTakingCoordinator();
+  const joined = vi.fn(async () => [
+    senderId,
+    "@beta:example.org",
+    "@gamma:example.org",
+    "@human:example.org",
+  ]);
+  const coordinator = params.coordinator ?? createMatrixTurnTakingCoordinator();
   const coordinatorCore = {
     channel: {
       routing: {
@@ -361,7 +370,7 @@ function createReceiverAuthorizedTurnTakingHarness(params: {
     log: vi.fn(),
   });
   coordinator.registerMonitor({
-    accountId: "beta",
+    accountId: receiverAccountId,
     userId: receiverId,
     homeserver: "https://matrix.example.org",
     client: coordinatorClient,
@@ -370,7 +379,7 @@ function createReceiverAuthorizedTurnTakingHarness(params: {
   });
   const decideParticipation = vi.fn(async () => ({
     eligible: true,
-    candidates: [],
+    members: [],
     disposition: "strongly-silent" as const,
     ownerAccountId: "alpha",
     baselineSequence: coordinator.currentSequence(),
@@ -382,7 +391,7 @@ function createReceiverAuthorizedTurnTakingHarness(params: {
     createFreshnessGate: vi.fn(),
   };
   const harness = createMatrixHandlerTestHarness({
-    accountId: "beta",
+    accountId: receiverAccountId,
     cfg,
     client: {
       getUserId: async () => receiverId,
@@ -911,29 +920,38 @@ describe("matrix monitor handler pairing account scope", () => {
     });
   });
 
-  it("admits a neutral eligible multi-agent room turn without a mention", async () => {
-    const decideParticipation = vi.fn(async () => ({
-      eligible: true,
-      candidates: [],
-      disposition: "neutral" as const,
-      ownerAccountId: "alpha",
-    }));
-    const { handler, recordInboundSession } = createMatrixHandlerTestHarness({
-      isDirectMessage: true,
-      turnTaking: { enabled: true },
-      turnTakingCoordinator: {
-        decideParticipation,
-      } as never,
-    });
+  it.each(["off", "always"] as const)(
+    "admits a neutral multi-agent turn with threadReplies=%s",
+    async (threadReplies) => {
+      const decideParticipation = vi.fn(async () => ({
+        eligible: true,
+        members: [],
+        disposition: "neutral" as const,
+        ownerAccountId: "alpha",
+      }));
+      const { handler, recordInboundSession } = createMatrixHandlerTestHarness({
+        isDirectMessage: true,
+        threadReplies,
+        turnTaking: { enabled: true },
+        turnTakingCoordinator: {
+          decideParticipation,
+        } as never,
+      });
 
-    await handler(
-      "!room:example.org",
-      createMatrixTextMessageEvent({ eventId: "$neutral", body: "what do you think?" }),
-    );
+      await handler(
+        "!room:example.org",
+        createMatrixTextMessageEvent({ eventId: "$neutral", body: "what do you think?" }),
+      );
 
-    expect(decideParticipation).toHaveBeenCalledOnce();
-    expect(recordInboundSession).toHaveBeenCalledOnce();
-  });
+      expect(decideParticipation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventId: "$neutral",
+          threadId: undefined,
+        }),
+      );
+      expect(recordInboundSession).toHaveBeenCalledOnce();
+    },
+  );
 
   it("releases ordinary ingress metadata when the account drops its own event early", async () => {
     const releaseIngress = vi.fn();
@@ -1017,7 +1035,7 @@ describe("matrix monitor handler pairing account scope", () => {
         beginIngressObservation,
         decideParticipation: vi.fn(async () => ({
           eligible: true,
-          candidates: [],
+          members: [],
           disposition: "neutral" as const,
           ownerAccountId: "alpha",
           baselineSequence: 1,
@@ -1081,7 +1099,7 @@ describe("matrix monitor handler pairing account scope", () => {
       turnTakingCoordinator: {
         decideParticipation: vi.fn(async () => ({
           eligible: true,
-          candidates: [],
+          members: [],
           disposition: "neutral" as const,
           ownerAccountId: "alpha",
           baselineSequence: 1,
@@ -1112,7 +1130,7 @@ describe("matrix monitor handler pairing account scope", () => {
   it("suppresses only a strongly-silent eligible candidate", async () => {
     const decideParticipation = vi.fn(async () => ({
       eligible: true,
-      candidates: [],
+      members: [],
       disposition: "strongly-silent" as const,
       ownerAccountId: "alpha",
     }));
@@ -1125,7 +1143,7 @@ describe("matrix monitor handler pairing account scope", () => {
         observeMessage: vi.fn(),
         resolveEligibility: vi.fn(async () => ({
           eligible: true,
-          candidates: [],
+          members: [],
           ownerAccountId: "alpha",
         })),
       } as never,
@@ -1144,7 +1162,7 @@ describe("matrix monitor handler pairing account scope", () => {
     const decideParticipation = vi.fn();
     const resolveEligibility = vi.fn(async () => ({
       eligible: true,
-      candidates: [],
+      members: [],
       ownerAccountId: "alpha",
     }));
     const { handler } = createMatrixHandlerTestHarness({
@@ -1291,7 +1309,7 @@ describe("matrix monitor handler pairing account scope", () => {
     const getMessageWireEventType = vi.fn(async () => "m.room.message" as const);
     const decideParticipation = vi.fn(async () => ({
       eligible: true,
-      candidates: [],
+      members: [],
       disposition: "neutral" as const,
       ownerAccountId: "alpha",
       baselineSequence: 1,
@@ -1472,7 +1490,7 @@ describe("matrix monitor handler pairing account scope", () => {
     const beginIngressObservation = vi.fn(() => releaseIngress);
     const decideParticipation = vi.fn(async () => ({
       eligible: true,
-      candidates: [],
+      members: [],
       disposition: "neutral" as const,
       ownerAccountId: "alpha",
       baselineSequence: 1,
@@ -1687,7 +1705,7 @@ describe("matrix monitor handler pairing account scope", () => {
         interceptPreviewEvent: vi.fn(async () => ({ kind: "promote", event: promoted })),
         decideParticipation: vi.fn(async () => ({
           eligible: true,
-          candidates: [],
+          members: [],
           disposition: "neutral" as const,
           ownerAccountId: "alpha",
           baselineSequence: 1,
@@ -1736,7 +1754,7 @@ describe("matrix monitor handler pairing account scope", () => {
         interceptPreviewEvent: vi.fn(async () => ({ kind: "promote", event: promoted })),
         decideParticipation: vi.fn(async () => ({
           eligible: true,
-          candidates: [],
+          members: [],
           disposition: "neutral" as const,
           ownerAccountId: "alpha",
           baselineSequence: 1,
@@ -1815,7 +1833,11 @@ describe("matrix monitor handler pairing account scope", () => {
         }),
       );
 
-      const freshness = coordinator.readFreshness({ roomId, afterSequence: baseline }).entries;
+      const freshness = coordinator.readFreshness({
+        view: { includesContext: () => true },
+        roomId,
+        afterSequence: baseline,
+      }).entries;
       if (scenario.allowed) {
         expect(freshness).toContainEqual(
           expect.objectContaining({
@@ -1830,6 +1852,125 @@ describe("matrix monitor handler pairing account scope", () => {
         scenario.allowed && scenario.state === "final" ? 1 : 0,
       );
       expect(recordInboundSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { state: "in-progress", contextVisibility: "allowlist" },
+    { state: "final", contextVisibility: "allowlist" },
+    { state: "in-progress", contextVisibility: "all" },
+    { state: "final", contextVisibility: "all" },
+  ] as const)(
+    "keeps sibling-authorized $state content scoped to receiver contextVisibility=$contextVisibility",
+    async ({ state, contextVisibility }) => {
+      vi.useFakeTimers();
+      const coordinator = createMatrixTurnTakingCoordinator();
+      const roomId = "!receiver-access:example.org";
+      const senderId = "@alpha:example.org";
+      const cfg = {
+        channels: {
+          matrix: {
+            turnTaking: { enabled: true },
+            contextVisibility,
+            accounts: Object.fromEntries(
+              ["alpha", "beta", "gamma"].map((accountId) => [
+                accountId,
+                {
+                  homeserver: "https://matrix.example.org",
+                  userId: `@${accountId}:example.org`,
+                  accessToken: `${accountId}-token`,
+                  groups: {
+                    [roomId]: {
+                      requireMention: false,
+                      users: [accountId === "beta" ? "@human:example.org" : senderId],
+                    },
+                  },
+                },
+              ]),
+            ),
+          },
+        },
+      };
+      const allowed = createReceiverAuthorizedTurnTakingHarness({
+        allowed: true,
+        policy: "room-users",
+        receiverAccountId: "gamma",
+        coordinator,
+        cfg,
+      });
+      const denied = createReceiverAuthorizedTurnTakingHarness({
+        allowed: false,
+        policy: "room-users",
+        coordinator,
+        cfg,
+      });
+      const baselineSequence = coordinator.currentSequence();
+      const gates = ["gamma", "beta"].map((accountId) =>
+        coordinator.createFreshnessGate({
+          accountId,
+          triggerSenderId: "@human:example.org",
+          cfg: cfg as never,
+          agentId: accountId,
+          roomId,
+          selfUserId: `@${accountId}:example.org`,
+          baselineSequence,
+          triggerEventId: "$human-trigger",
+          config: {
+            enabled: true,
+            redraftDepth: 1,
+            nextStep: { decider: "user", action: "redraft" },
+          },
+          log: vi.fn(),
+        })!,
+      );
+      const body = "Visible to gamma, excluded from beta's context";
+      const event = createMatrixRoomMessageEvent({
+        eventId: `$receiver-visibility-${state}`,
+        sender: senderId,
+        content: {
+          msgtype: "m.text",
+          body,
+          [MATRIX_PREVIEW_PROTOCOL_KEY]: {
+            v: 1,
+            responseId: `receiver-visibility-${state}`,
+            triggerEventId: "$sibling-trigger",
+            state,
+            revision: 0,
+            kind: "answer",
+            ...(state === "final" ? { partIndex: 0, partCount: 1 } : {}),
+          },
+        },
+      });
+
+      await allowed.handler(roomId, event);
+      await denied.handler(roomId, event);
+      expect(denied.decideParticipation).not.toHaveBeenCalled();
+      expect(denied.runPrepared).not.toHaveBeenCalled();
+
+      const pending = gates.map((gate) =>
+        gate({
+          runId: "run",
+          sessionId: "session",
+          provider: "full",
+          model: "full-model",
+          lastAssistantMessage: "Answer to the allowed human",
+          revisionAttempt: 0,
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      const [allowedResult, deniedResult] = await Promise.all(pending);
+      expect(allowedResult).toMatchObject({
+        action: "revise",
+        instruction: expect.stringContaining(body),
+      });
+      if (contextVisibility === "all") {
+        expect(deniedResult).toMatchObject({
+          action: "revise",
+          instruction: expect.stringContaining(body),
+        });
+      } else {
+        expect(deniedResult).toEqual({ action: "continue" });
+      }
     },
   );
 
@@ -1894,9 +2035,10 @@ describe("matrix monitor handler pairing account scope", () => {
     expect(claim).toHaveBeenCalledWith({ roomId, eventId: "$preview-replay-root" });
     expect(commit).toHaveBeenCalledOnce();
     expect(release).not.toHaveBeenCalled();
-    expect(coordinator.readFreshness({ roomId, afterSequence: 0 }).entries).toContainEqual(
-      expect.objectContaining({ body: "complete", state: "final" }),
-    );
+    expect(
+      coordinator.readFreshness({ view: { includesContext: () => true }, roomId, afterSequence: 0 })
+        .entries,
+    ).toContainEqual(expect.objectContaining({ body: "complete", state: "final" }));
   });
 
   it.each<{
@@ -4340,7 +4482,7 @@ describe("matrix monitor handler draft streaming", () => {
             turnTakingCoordinator: {
               decideParticipation: vi.fn(async () => ({
                 eligible: true,
-                candidates: [],
+                members: [],
                 disposition: "neutral" as const,
                 ownerAccountId: "ops",
                 baselineSequence: 1,
@@ -4485,7 +4627,7 @@ describe("matrix monitor handler draft streaming", () => {
       turnTakingCoordinator: {
         decideParticipation: vi.fn(async () => ({
           eligible: true,
-          candidates: [],
+          members: [],
           disposition: "neutral" as const,
           ownerAccountId: "ops",
           baselineSequence: 1,
@@ -4580,7 +4722,7 @@ describe("matrix monitor handler draft streaming", () => {
       turnTakingCoordinator: {
         decideParticipation: vi.fn(async () => ({
           eligible: true,
-          candidates: [],
+          members: [],
           disposition: "neutral" as const,
           ownerAccountId: "ops",
           baselineSequence: 1,
