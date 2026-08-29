@@ -385,7 +385,7 @@ Utility-model failure, timeout, or invalid output selects `send-as-is`, preservi
 
 Enhanced rooms support Matrix `partial`, `quiet`, and `progress` preview streaming. OpenClaw correlates an initial preview, its edits, and its final state so sibling agents can observe bounded progress without treating every edit as a new message. Only one authenticated logical final is promoted into sibling ingress; partial, ancillary media, tool progress, and abandoned previews never trigger a normal sibling turn. Media-bearing replacements close and redact the old preview before publishing the replacement final.
 
-The embedded runtime streams source-owned provisional previews during generation while holding assistant events and final replies for freshness review. If a plugin also registers a global `before_agent_finalize` hook, that hook's existing buffering policy takes precedence and previews wait until finalization is accepted.
+The embedded runtime streams source-owned provisional previews during generation while holding assistant events and final replies for freshness review. If a plugin also registers a global `before_agent_finalize` hook, Matrix disables preview streaming and holds the final reply until finalization is accepted.
 
 `streaming.block.enabled` is effectively forced off for each eligible enhanced turn without rewriting stored config. Block streaming is not supported by intelligent turn-taking. Ineligible and opted-out rooms keep their configured streaming behavior.
 
