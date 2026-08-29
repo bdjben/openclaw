@@ -1947,15 +1947,16 @@ describe("matrix monitor handler pairing account scope", () => {
       expect(denied.decideParticipation).not.toHaveBeenCalled();
       expect(denied.runPrepared).not.toHaveBeenCalled();
 
-      const pending = gates.map((gate) =>
-        gate({
-          runId: "run",
-          sessionId: "session",
-          provider: "full",
-          model: "full-model",
-          lastAssistantMessage: "Answer to the allowed human",
-          revisionAttempt: 0,
-        }),
+      const pending = gates.map(
+        async (gate) =>
+          await gate({
+            runId: "run",
+            sessionId: "session",
+            provider: "full",
+            model: "full-model",
+            lastAssistantMessage: "Answer to the allowed human",
+            revisionAttempt: 0,
+          }),
       );
       await vi.advanceTimersByTimeAsync(200);
       const [allowedResult, deniedResult] = await Promise.all(pending);

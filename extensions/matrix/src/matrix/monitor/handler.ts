@@ -33,13 +33,11 @@ import { loadMatrixSendModule } from "./handler-runtime.js";
 import { createMatrixHandlerState } from "./handler-state.js";
 import { createMatrixTurnTakingPreflight } from "./handler-turn-taking-preflight.js";
 import type { MatrixHandlerRuntimeConfig, MatrixMonitorHandlerParams } from "./handler-types.js";
-import { prepareMatrixIngressAccessSnapshot } from "./ingress-access-snapshot.js";
+import { createMatrixReceiverAccessPreparer } from "./ingress-access-snapshot.js";
 import { createMatrixReplyContextResolver } from "./reply-context.js";
 import { createRoomHistoryTracker } from "./room-history.js";
-import { resolveMatrixInboundRoute } from "./route.js";
 import { bindMatrixSourceFinalizationRequest } from "./source-finalization-request.js";
 import { createMatrixThreadContextResolver } from "./thread-context.js";
-import { resolveMatrixThreadRouting } from "./threads.js";
 import type { MatrixRawEvent } from "./types.js";
 import { EventType } from "./types.js";
 
@@ -104,47 +102,10 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
     groupAllowFromResolvedEntries,
     resolveLiveUserAllowlist,
   });
-  params.turnTakingCoordinator?.configureMonitorAccess(accountId, async (input) => {
-    const selfUserId = await client.getUserId();
-    const isDirectMessage = await directTracker.isDirectMessage({
-      roomId: input.roomId,
-      senderId: input.senderId,
-      selfUserId,
-    });
-    const snapshot = await prepareMatrixIngressAccessSnapshot({
-      handler: handlerConfig,
-      roomId: input.roomId,
-      senderId: input.senderId,
-      isDirectMessage,
-      trustedEnhancedFinal: input.trustedEnhancedFinal === true,
-      readStoreAllowFrom: handlerState.readStoreAllowFrom,
-      resolveLiveAccountAllowlists: handlerState.resolveLiveAccountAllowlists,
-    });
-    const thread = resolveMatrixThreadRouting({
-      isDirectMessage,
-      threadReplies: params.threadReplies,
-      dmThreadReplies: params.dmThreadReplies,
-      messageId: input.eventId ?? "",
-      threadRootId: input.threadId,
-    });
-    const { route } = resolveMatrixInboundRoute({
-      cfg,
-      accountId,
-      roomId: input.roomId,
-      senderId: input.senderId,
-      isDirectMessage,
-      dmSessionScope,
-      threadId: thread.threadId,
-      eventTs: input.eventTs,
-      resolveAgentRoute: core.channel.routing.resolveAgentRoute,
-    });
-    return {
-      agentId: route.agentId,
-      canParticipate:
-        snapshot.canParticipate && !snapshot.turnTakingDisabled && input.senderId !== selfUserId,
-      includesContext: snapshot.includesContext,
-    };
-  });
+  params.turnTakingCoordinator?.configureMonitorAccess(
+    accountId,
+    createMatrixReceiverAccessPreparer(handlerConfig, handlerState),
+  );
   const resolveThreadContext = createMatrixThreadContextResolver({
     client,
     getMemberDisplayName,
