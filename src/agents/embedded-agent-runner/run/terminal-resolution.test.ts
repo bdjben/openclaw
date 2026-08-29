@@ -1,14 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
+import { classifyAgentExecResult } from "../../../commands/agent-exec.js";
 import {
   buildEmbeddedRunnerAssistant,
   makeEmbeddedRunnerAttempt,
 } from "../../test-helpers/embedded-agent-runner-e2e-fixtures.js";
+import {
+  markEmbeddedRunAuthProfileSuccess,
+  reportEmbeddedRunSuccessfulAuthBinding,
+} from "./auth-profile-success.js";
 import { TRUNCATED_REPLY_NOTICE_TEXT } from "./incomplete-turn-resolution.js";
 import { resolveEmbeddedRunAttemptTerminalState } from "./terminal-outcome.js";
 import {
-  copyAttemptDeliveryState,
-  createTerminalToolPresentationTracker,
   resolveEmbeddedRunTerminal,
   resolveSettledTurnFinalizationRequest,
 } from "./terminal-resolution.js";
@@ -19,6 +22,11 @@ import {
   type TerminalInputOverrides,
 } from "./terminal-resolution.test-support.js";
 import { createEmbeddedRunTerminalRetryState } from "./terminal-retry-state.js";
+
+vi.mock("./auth-profile-success.js", () => ({
+  markEmbeddedRunAuthProfileSuccess: vi.fn(),
+  reportEmbeddedRunSuccessfulAuthBinding: vi.fn(),
+}));
 
 const EMPTY_RESPONSE_RETRY_INSTRUCTION =
   "The previous attempt did not produce a user-visible answer. Continue from the current state and produce the visible answer now. Do not restart from scratch.";
@@ -37,32 +45,145 @@ async function resolveTerminalText(overrides: TerminalInputOverrides): Promise<s
 }
 
 describe("terminal resolution", () => {
-  it.each(["empty", "reasoning"])(
-    "preserves a failed harness turn instead of retrying its %s output",
-    async (output) => {
-      const error = new Error("Authentication failed with provider (HTTP 401)");
-      const assistant =
-        output === "reasoning"
-          ? buildEmbeddedRunnerAssistant({ content: [{ type: "thinking", thinking: "checking" }] })
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([
+    "empty",
+    "reasoning",
+    "cleanup",
+    "tool warning",
+    "partial reply",
+    "committed delivery",
+    "accepted discard",
+  ])("preserves a failed harness turn instead of retrying its %s output", async (output) => {
+    const error = new Error("Provider failed while a tool was pending");
+    const cleanupFailed = output !== "empty" && output !== "reasoning";
+    const discarded = output === "accepted discard";
+    const partialText = "The first operation finished.";
+    const assistant =
+      output === "reasoning"
+        ? buildEmbeddedRunnerAssistant({ content: [{ type: "thinking", thinking: "checking" }] })
+        : cleanupFailed
+          ? buildEmbeddedRunnerAssistant({
+              stopReason: "toolUse",
+              content: [{ type: "text", text: partialText }],
+            })
           : undefined;
-      const attempt = makeEmbeddedRunnerAttempt({
-        terminal: { kind: "failed", source: "prompt", error },
-        assistantTexts: [],
-        currentAttemptAssistant: assistant,
-        lastAssistant: assistant,
-        replayMetadata: { hadPotentialSideEffects: false, replaySafe: false },
-      });
-      const input = makeTerminalInput({ attempt });
+    const payloads =
+      output === "tool warning"
+        ? [{ text: "The pending tool was cancelled.", isError: true }]
+        : output === "partial reply" || discarded
+          ? [{ text: partialText }]
+          : output === "cleanup"
+            ? undefined
+            : [];
+    const attempt = makeEmbeddedRunnerAttempt({
+      terminal: { kind: "failed", source: "prompt", error },
+      assistantTexts: output === "partial reply" || discarded ? [partialText] : [],
+      ...(discarded
+        ? {
+            beforeAgentFinalizeDiscarded: true as const,
+            clientToolCalls: [{ name: "computer_use", params: { task: "rejected action" } }],
+          }
+        : {}),
+      currentAttemptAssistant: assistant,
+      lastAssistant: assistant,
+      lastToolError: cleanupFailed
+        ? { toolName: "exec", error: "Tool execution aborted" }
+        : undefined,
+      toolMetas: cleanupFailed ? [{ toolName: "exec", isError: true, replaySafe: false }] : [],
+      didSendViaMessagingTool: output === "committed delivery",
+      messagingToolSentTexts: output === "committed delivery" ? [partialText] : [],
+      replayMetadata: { hadPotentialSideEffects: cleanupFailed, replaySafe: false },
+    });
+    const onSuccessfulAuthProfile = vi.fn();
+    const input = makeTerminalInput({
+      attempt,
+      payloadsWithToolMedia: payloads,
+      ...(discarded
+        ? { finalAssistantVisibleText: partialText, finalAssistantRawText: partialText }
+        : {}),
+      authProfileId: "openai:selected",
+      runParams: { onSuccessfulAuthProfile },
+    });
 
-      const resolved = await resolveEmbeddedRunTerminal(input);
+    const resolved = await resolveEmbeddedRunTerminal(input);
 
-      expect(resolved).toMatchObject({
-        action: "complete",
-        result: { meta: { error: { message: error.message, fallbackSafe: false } } },
-      });
-      expect(input.activateInternalPrompt).not.toHaveBeenCalled();
-    },
-  );
+    expect(resolved).toMatchObject({
+      action: "complete",
+      result: { meta: { error: { message: error.message, fallbackSafe: false } } },
+    });
+    expect(input.activateInternalPrompt).not.toHaveBeenCalled();
+    expect(input.setSuppressNextUserMessagePersistence).not.toHaveBeenCalled();
+    expect(input.armPostCompactionGuard).not.toHaveBeenCalled();
+    expect(markEmbeddedRunAuthProfileSuccess).not.toHaveBeenCalled();
+    expect(reportEmbeddedRunSuccessfulAuthBinding).not.toHaveBeenCalled();
+    expect(onSuccessfulAuthProfile).not.toHaveBeenCalled();
+    expect(input.setTerminalLifecycleMeta).toHaveBeenCalledWith(
+      expect.objectContaining({ livenessState: "abandoned" }),
+    );
+    if (resolved.action === "complete") {
+      expect(classifyAgentExecResult(resolved.result).status).toBe("error");
+      expect(resolved.result.meta.executionTrace?.attempts ?? []).not.toContainEqual(
+        expect.objectContaining({ result: "success" }),
+      );
+      if (discarded) {
+        expect(resolved.result.payloads).toBeUndefined();
+        expect(resolved.result.meta.finalAssistantVisibleText).toBeUndefined();
+        expect(resolved.result.meta.finalAssistantRawText).toBeUndefined();
+        expect(resolved.result.meta.pendingToolCalls).toBeUndefined();
+        expect(resolved.result.meta.stopReason).toBeUndefined();
+        expect(resolved.result.meta.intentionalTerminalCompletion).toBeUndefined();
+      } else if (cleanupFailed) {
+        expect(resolved.result.payloads ?? []).toEqual(payloads ?? []);
+        expect(resolved.result.messagingToolSentTexts).toEqual(attempt.messagingToolSentTexts);
+      }
+    }
+  });
+
+  it("keeps external cancellation ahead of a failed attempt during final result construction", async () => {
+    const assistant = emptyAssistant({ stopReason: "stop" });
+    const attempt = makeEmbeddedRunnerAttempt({
+      terminal: { kind: "failed", source: "prompt", error: new Error("Late provider failure") },
+      lastToolError: { toolName: "exec", error: "Tool execution aborted" },
+      currentAttemptAssistant: assistant,
+      replayMetadata: { hadPotentialSideEffects: true, replaySafe: false },
+    });
+    const terminalState = resolveEmbeddedRunAttemptTerminalState({
+      attempt,
+      assistant,
+      abortSignal: AbortSignal.abort(),
+    });
+    const input = makeTerminalInput({ attempt, terminalState });
+    const resolved = await resolveEmbeddedRunTerminal(input);
+    expect(resolved).toMatchObject({ action: "complete", result: { meta: { aborted: true } } });
+    if (resolved.action === "complete") {
+      expect(resolved.result.meta.error).toBeUndefined();
+      expect(resolved.result.meta.livenessState).toBe("blocked");
+    }
+    expect(input.activateInternalPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ordinary tool failure nonfatal when the attempt completed", async () => {
+    const text = "The operation failed; the earlier result is still available.";
+    const assistant = buildEmbeddedRunnerAssistant({ content: [{ type: "text", text }] });
+    const attempt = makeEmbeddedRunnerAttempt({
+      lastToolError: { toolName: "exec", error: "Tool failed" },
+      assistantTexts: [text],
+      currentAttemptAssistant: assistant,
+      replayMetadata: { hadPotentialSideEffects: true, replaySafe: false },
+    });
+    const resolved = await resolveEmbeddedRunTerminal(
+      makeTerminalInput({ attempt, payloadsWithToolMedia: [{ text }] }),
+    );
+    expect(resolved.action).toBe("complete");
+    if (resolved.action === "complete") {
+      expect(resolved.result.meta.error).toBeUndefined();
+      expect(classifyAgentExecResult(resolved.result).status).toBe("ok");
+      expect(resolved.result.payloads).toEqual([{ text }]);
+    }
+    expect(markEmbeddedRunAuthProfileSuccess).toHaveBeenCalledOnce();
+  });
 
   it.each(["openai:selected", undefined])(
     "reports the successful profile %s privately for command maintenance",
@@ -235,38 +356,6 @@ describe("terminal resolution", () => {
     });
     expect(text).toContain("some tool actions may have already been executed");
     expect(text).not.toContain("Couldn't sign in");
-  });
-
-  it("carries presentation across retries until a newer tool outcome replaces it", () => {
-    const tracker = createTerminalToolPresentationTracker();
-    const firstOrdinal = tracker.allocateOrdinal();
-    tracker.observe({
-      toolCallOrdinal: firstOrdinal,
-      terminalPresentation: "Fetched https://example.com",
-    });
-
-    expect(tracker.read()).toBe("Fetched https://example.com");
-
-    const retryOrdinal = tracker.allocateOrdinal();
-    expect(tracker.read()).toBe("Fetched https://example.com");
-    tracker.observe({ toolCallOrdinal: retryOrdinal });
-    tracker.observe({
-      toolCallOrdinal: firstOrdinal,
-      terminalPresentation: "stale presentation",
-    });
-
-    expect(tracker.read()).toBeUndefined();
-  });
-
-  it("keeps only the bounded latest MCP App view identity", () => {
-    expect(
-      copyAttemptDeliveryState({
-        latestMcpAppChannelView: { viewId: "view-latest" },
-        messagingToolSentTexts: [],
-        messagingToolSentMediaUrls: [],
-        messagingToolSentTargets: [],
-      } as never).latestMcpAppChannelView,
-    ).toEqual({ viewId: "view-latest" });
   });
 
   it("retries a required empty reply even when deliberate silence is enabled", async () => {

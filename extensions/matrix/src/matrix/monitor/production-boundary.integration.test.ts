@@ -22,6 +22,7 @@ const modelGateway = vi.hoisted(() => ({
   participation: "speak" as "speak" | "silent",
   nextStep: "send-as-is" as "redraft" | "discard" | "send-as-is",
   participationCalls: 0,
+  participationRosters: [] as Array<{ eventId: string; accountIds: string[] }>,
   nextStepCalls: 0,
 }));
 
@@ -33,19 +34,25 @@ if (!matrixConfigRuntimeSchema) {
 vi.mock("openclaw/plugin-sdk/simple-completion-runtime", () => ({
   prepareSimpleCompletionModelForAgent: vi.fn(async () => ({ model: {}, auth: {} })),
   completeWithPreparedSimpleCompletionModel: vi.fn(
-    async (params: { context: { systemPrompt: string } }) => {
+    async (params: { context: { systemPrompt: string; messages: Array<{ content: string }> } }) => {
       if (params.context.systemPrompt.includes("participation controller")) {
         modelGateway.participationCalls += 1;
+        const { untrustedRoomData } = JSON.parse(params.context.messages[0]!.content) as {
+          untrustedRoomData: { eventId: string; candidates: Array<{ accountId: string }> };
+        };
+        modelGateway.participationRosters.push({
+          eventId: untrustedRoomData.eventId,
+          accountIds: untrustedRoomData.candidates.map(({ accountId }) => accountId),
+        });
         return {
           text: JSON.stringify({
-            decisions: [
-              {
-                accountId: "alpha",
-                disposition:
-                  modelGateway.participation === "speak" ? "strongly-speak" : "strongly-silent",
-              },
-              { accountId: "beta", disposition: "strongly-silent" },
-            ],
+            decisions: untrustedRoomData.candidates.map(({ accountId }) => ({
+              accountId,
+              disposition:
+                accountId === "alpha" && modelGateway.participation === "speak"
+                  ? "strongly-speak"
+                  : "strongly-silent",
+            })),
           }),
         };
       }
@@ -177,27 +184,29 @@ async function createHarness(params: {
   const logs: string[] = [];
   const wireType = params.wireType ?? "m.room.message";
   let sendIndex = 0;
-  const client = {
-    getUserId: async () => "@alpha:example.org",
-    getEvent: async () => undefined,
-    getRelations: async () => ({ events: [] }),
-    getJoinedRoomMembers: async () => [
-      "@alpha:example.org",
-      "@beta:example.org",
-      "@human:example.org",
-    ],
-    getMessageWireEventType: async () => wireType,
-    prepareRoomForMessageSend: async () => wireType,
-    getTransactionScopeId: async () => "proof-device",
-    sendEvent: async () => `$event-${++sendIndex}`,
-    sendMessage: async (roomId: string, content: { body?: string }) => {
-      terminalSends.push({ roomId, body: content.body ?? "", wireType });
-      return `$message-${++sendIndex}`;
-    },
-    sendReadReceipt: async () => undefined,
-    setTyping: async () => undefined,
-    redactEvent: async () => undefined,
-  } as unknown as MatrixClient;
+  const createClient = (accountId: "alpha" | "beta") =>
+    ({
+      getUserId: async () => `@${accountId}:example.org`,
+      getEvent: async () => undefined,
+      getRelations: async () => ({ events: [] }),
+      getJoinedRoomMembers: async () => [
+        "@alpha:example.org",
+        "@beta:example.org",
+        "@human:example.org",
+      ],
+      getMessageWireEventType: async () => wireType,
+      prepareRoomForMessageSend: async () => wireType,
+      getTransactionScopeId: async () => `proof-device-${accountId}`,
+      sendEvent: async () => `$event-${++sendIndex}`,
+      sendMessage: async (roomId: string, content: { body?: string }) => {
+        terminalSends.push({ roomId, body: content.body ?? "", wireType });
+        return `$message-${++sendIndex}`;
+      },
+      sendReadReceipt: async () => undefined,
+      setTyping: async () => undefined,
+      redactEvent: async () => undefined,
+    }) as unknown as MatrixClient;
+  const clients = { alpha: createClient("alpha"), beta: createClient("beta") };
 
   const ownerInbound = fixture.channelRuntime.inbound;
   const proofRun = ((runParams: Parameters<typeof ownerInbound.run>[0]) =>
@@ -227,7 +236,7 @@ async function createHarness(params: {
       accountId,
       userId,
       homeserver: "https://matrix.example.org",
-      client,
+      client: clients[accountId],
       core: proofRuntime as never,
       log: (entry) => logs.push(entry),
     });
@@ -236,54 +245,65 @@ async function createHarness(params: {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pr113115-boundary-"));
   tempRoots.push(tempRoot);
   const roomsConfig = { "*": { requireMention: params.requireMention ?? false } };
-  const handler = createMatrixRoomMessageHandler({
-    client,
-    core: proofRuntime as never,
-    cfg,
-    accountId: "alpha",
-    accountConfig: cfg.channels?.matrix?.accounts?.alpha,
-    runtime: {
-      log: (entry: string) => logs.push(entry),
-      error: (entry: string) => errors.push(entry),
-      exit: () => undefined,
-    } as never,
-    logger: {
-      info: () => undefined,
-      warn: () => undefined,
-      error: (entry: unknown) => errors.push(String(entry)),
-      debug: () => undefined,
-    },
-    logVerboseMessage: (entry) => logs.push(entry),
-    allowFrom: ["*"],
-    groupAllowFrom: ["*"],
-    groupPolicy: "open",
-    roomsConfig,
-    accountAllowBots: true,
-    configuredBotUserIds: new Set(["@alpha:example.org", "@beta:example.org"]),
-    replyToMode: "off",
-    threadReplies: "off",
-    streaming: "off",
-    previewToolProgressEnabled: false,
-    blockStreamingEnabled: false,
-    dmEnabled: true,
-    dmPolicy: "open",
-    mediaMaxBytes: 10_000_000,
-    historyLimit: 0,
-    startupMs: 0,
-    startupGraceMs: 0,
-    dropPreStartupMessages: false,
-    directTracker: { isDirectMessage: async () => false },
-    getRoomInfo: async () => ({ altAliases: [] }),
-    getMemberDisplayName: async (_roomId, userId) => userId,
-    needsRoomAliasesForConfig: false,
-    turnTaking: params.turnTaking,
-    turnTakingRoomsConfig: roomsConfig,
-    needsRoomAliasesForTurnTakingConfig: false,
-    turnTakingCoordinator: coordinator,
-    ...(params.omitHostInbound ? {} : { channelInbound: proofChannelInbound }),
-    resolveStorePath: () => path.join(tempRoot, "sessions.json"),
-  });
-  return { client, coordinator, errors, fixture, handler, logs, terminalSends };
+  const createHandler = (accountId: "alpha" | "beta") =>
+    createMatrixRoomMessageHandler({
+      client: clients[accountId],
+      core: proofRuntime as never,
+      cfg,
+      accountId,
+      accountConfig: cfg.channels?.matrix?.accounts?.[accountId],
+      runtime: {
+        log: (entry: string) => logs.push(entry),
+        error: (entry: string) => errors.push(entry),
+        exit: () => undefined,
+      } as never,
+      logger: {
+        info: () => undefined,
+        warn: () => undefined,
+        error: (entry: unknown) => errors.push(String(entry)),
+        debug: () => undefined,
+      },
+      logVerboseMessage: (entry) => logs.push(entry),
+      allowFrom: ["*"],
+      groupAllowFrom: ["*"],
+      groupPolicy: "open",
+      roomsConfig,
+      accountAllowBots: true,
+      configuredBotUserIds: new Set(["@alpha:example.org", "@beta:example.org"]),
+      replyToMode: "off",
+      threadReplies: "off",
+      streaming: "off",
+      previewToolProgressEnabled: false,
+      blockStreamingEnabled: false,
+      dmEnabled: true,
+      dmPolicy: "open",
+      mediaMaxBytes: 10_000_000,
+      historyLimit: 0,
+      startupMs: 0,
+      startupGraceMs: 0,
+      dropPreStartupMessages: false,
+      directTracker: { isDirectMessage: async () => false },
+      getRoomInfo: async () => ({ altAliases: [] }),
+      getMemberDisplayName: async (_roomId, userId) => userId,
+      needsRoomAliasesForConfig: false,
+      turnTaking: params.turnTaking,
+      turnTakingRoomsConfig: roomsConfig,
+      needsRoomAliasesForTurnTakingConfig: false,
+      turnTakingCoordinator: coordinator,
+      ...(params.omitHostInbound ? {} : { channelInbound: proofChannelInbound }),
+      resolveStorePath: () => path.join(tempRoot, accountId, "sessions.json"),
+    });
+  // Every registered monitor needs its real account handler to prepare receiver access.
+  const handlers = { alpha: createHandler("alpha"), beta: createHandler("beta") };
+  return {
+    client: clients.alpha,
+    coordinator,
+    errors,
+    fixture,
+    handler: handlers.alpha,
+    logs,
+    terminalSends,
+  };
 }
 
 describe("PR #113115 production owner and Matrix delivery boundary", () => {
@@ -320,6 +340,10 @@ describe("PR #113115 production owner and Matrix delivery boundary", () => {
       enhancedFinalMessage({ eventId: "$allowed", body: "Alpha, take this." }),
     );
     expect(allowed.errors).toEqual([]);
+    expect(modelGateway.participationRosters).toContainEqual({
+      eventId: "$allowed",
+      accountIds: ["alpha"],
+    });
     expect(allowedOwner).toBeDefined();
     const allowedBefore = allowed.terminalSends.length;
     const allowedOutcome = await allowedOwner!.deliver(
@@ -450,6 +474,10 @@ describe("PR #113115 production owner and Matrix delivery boundary", () => {
       message({ eventId: "$redraft", body: "Draft an answer, Alpha." }),
     );
     expect(redraftHarness.errors).toEqual([]);
+    expect(modelGateway.participationRosters).toContainEqual({
+      eventId: "$redraft",
+      accountIds: ["alpha", "beta"],
+    });
     const redraftBodies = redraftHarness.terminalSends
       .slice(redraftBefore)
       .map((entry) => entry.body);

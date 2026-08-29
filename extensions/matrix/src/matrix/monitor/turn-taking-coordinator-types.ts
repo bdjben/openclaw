@@ -77,7 +77,7 @@ export type MatrixReceiverAccessInput = {
   trustedEnhancedFinal?: boolean;
 };
 
-export type MatrixReceiverAccess = {
+type MatrixReceiverAccess = {
   agentId: string;
   canParticipate: boolean;
   includesContext: (senderId: string) => boolean;

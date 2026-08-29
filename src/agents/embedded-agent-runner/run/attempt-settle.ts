@@ -164,7 +164,7 @@ export async function runEmbeddedAttemptSettledPhase(
   const { bootstrapPromptWarning, shouldRecordCompletedBootstrapTurn } = bootstrap;
   const { effectiveTools, emptyExplicitToolAllowlistError, toolSearch } = toolCatalog;
   const { tools, uncompactedEffectiveTools } = bundleTools;
-  const { toolSearchTargetTranscriptProjections } = toolBase;
+  const { nestedToolActivities } = toolBase;
   const hookAgentId = input.setup.sessionAgentId;
   let yieldAborted = false;
   const preparedStreamRuntime = input.preparedStreamRuntime;
@@ -491,7 +491,7 @@ export async function runEmbeddedAttemptSettledPhase(
           onBlockReplyFlush,
           abortable,
           prePromptMessageCount: sessionRuntimeState.prePromptMessageCount,
-          toolSearchTargetTranscriptProjections,
+          nestedToolActivities,
           cache: {
             observabilityEnabled: cacheObservabilityEnabled,
             changesForTurn: promptCacheChangesForTurn,
@@ -575,6 +575,7 @@ export async function runEmbeddedAttemptSettledPhase(
         sessionIdUsed: settledStream.sessionIdUsed,
         sessionFileUsed,
         messagesSnapshot: settledMessagesSnapshot,
+        nestedToolActivities,
         prePromptMessageCount: sessionRuntimeState.prePromptMessageCount,
         contextEngineAfterTurnCheckpoint: contextGuards.getAfterTurnCheckpoint(),
         lastCallUsage: settledStream.lastCallUsage,

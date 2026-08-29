@@ -55,11 +55,11 @@ import {
   PluginHarnessSourceFinalizationUnsupportedError,
   resolveAgentHarnessPreflightOwner,
 } from "./errors.js";
+import { resolveAgentHarnessPolicy } from "./policy.js";
 import { clearAgentHarnesses, registerAgentHarness } from "./registry.js";
 import {
   agentHarnessBuildsOpenClawTools,
   agentHarnessExposesOpenClawTools,
-  resolveAgentHarnessPolicy,
   resolveAvailableAgentHarnessPolicy,
   resolvePluginHarnessPolicyToolsAllow,
   runAgentHarnessAttempt,

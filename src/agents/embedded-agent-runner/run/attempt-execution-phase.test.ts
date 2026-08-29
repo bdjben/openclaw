@@ -153,7 +153,7 @@ function createFixture(
       bundleTools: {},
       sessionRuntime,
       systemPrompt: { runtimeChannel: "telegram" },
-      toolBase: { skillInstructionDeliveryCache, toolSearchTargetTranscriptProjections: new Map() },
+      toolBase: { skillInstructionDeliveryCache, nestedToolActivities: new Map() },
       toolCatalog: {
         toolSearchRunPlan: {
           capabilityToolNames: new Set(["read"]),
