@@ -430,8 +430,9 @@ export function buildCodexRuntimeThreadConfigForRun(
     (options.hostSystemAgentActive ?? isHostScopedAgentToolActive("openclaw")) &&
     isSystemAgentOnlyCodexDynamicToolAllowlist(params.toolsAllow);
   const messageOnlySourceReply = isMessageOnlyCodexSourceReply(params);
-  const restrictedToolSurface =
+  const isolateNativeHooks =
     ringZeroActive || messageOnlySourceReply || params.pluginHarnessToolPolicyRestricted === true;
+  const restrictedToolSurface = isolateNativeHooks || params.disableTools === true;
   const restrictedTurnDisablesProjectDocs =
     ringZeroActive ||
     messageOnlySourceReply ||
@@ -470,13 +471,9 @@ export function buildCodexRuntimeThreadConfigForRun(
       params.delegationCapability === "report_only"
         ? CODEX_DELEGATION_DISABLED_THREAD_CONFIG
         : undefined,
-      messageOnlySourceReply || params.pluginHarnessToolPolicyRestricted === true
-        ? buildRestrictedToolConfigPatch(restrictedToolSurfaceMcpServerNames)
-        : buildCodexRingZeroThreadConfigPatch(
-            params,
-            options.hostSystemAgentActive,
-            restrictedToolSurfaceMcpServerNames,
-          ),
+      restrictedToolSurface
+        ? buildRestrictedToolConfigPatch(restrictedToolSurfaceMcpServerNames, !isolateNativeHooks)
+        : undefined,
       restrictedTurnDisablesProjectDocs ? CODEX_NO_PROJECT_DOCS_CONFIG : undefined,
       params.authoredContextTokenCap === undefined
         ? undefined
@@ -507,17 +504,28 @@ export function buildCodexRingZeroThreadConfigPatch(
   };
 }
 
-function buildRestrictedToolConfigPatch(inheritedMcpServerNames: readonly string[]): JsonObject {
+function buildRestrictedToolConfigPatch(
+  inheritedMcpServerNames: readonly string[],
+  preserveNativeHooks = false,
+): JsonObject {
   // Restricted turns already send environments: [] and disable native code mode.
   // Remove Codex-owned tool sources here; project-document suppression belongs to
   // ring-zero, message-only, and tool-disabled context policy at the caller.
   const mcpServers = Object.fromEntries(
     [...new Set(inheritedMcpServerNames)].toSorted().map((name) => [name, { enabled: false }]),
   );
-  return {
+  const config: JsonObject = {
     ...CODEX_RING_ZERO_THREAD_CONFIG,
     ...(Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : {}),
   };
+  // Ordinary no-tool retries retain lifecycle hooks, including the authoritative
+  // Stop gate. Ring-zero and policy-isolated turns still suppress ambient execution.
+  if (preserveNativeHooks) {
+    delete config["features.hooks"];
+    delete config.hooks;
+    delete config.notify;
+  }
+  return config;
 }
 
 export async function readCodexInheritedMcpServerNames(
@@ -571,6 +579,7 @@ export async function assertCodexManagedRequirementsDoNotOverrideToolPolicy(
   client: Pick<CodexAppServerClient, "request">,
   options: {
     restrictedToolSurface: boolean;
+    preserveNativeHooks?: boolean;
     additionalDeniedFeatures?: readonly string[];
   },
   signal?: AbortSignal,
@@ -589,7 +598,7 @@ export async function assertCodexManagedRequirementsDoNotOverrideToolPolicy(
   if (!isJsonObject(response.requirements)) {
     throw new Error("Codex configRequirements/read returned invalid requirements");
   }
-  if (options.restrictedToolSurface) {
+  if (options.restrictedToolSurface && !options.preserveNativeHooks) {
     for (const key of ["hooks", "managedHooks", "managed_hooks"] as const) {
       const hooks = response.requirements[key];
       if (hooks === undefined || hooks === null) {
@@ -619,6 +628,7 @@ export async function assertCodexManagedRequirementsDoNotOverrideToolPolicy(
       const canonicalFeature = CODEX_RING_ZERO_RESTRICTED_FEATURE_ALIASES.get(feature) ?? feature;
       const deniedByToolPolicy =
         (options.restrictedToolSurface &&
+          (!options.preserveNativeHooks || canonicalFeature !== "hooks") &&
           CODEX_RING_ZERO_RESTRICTED_FEATURES.has(canonicalFeature)) ||
         additionalDeniedFeatures.has(canonicalFeature);
       if (enabled && deniedByToolPolicy) {

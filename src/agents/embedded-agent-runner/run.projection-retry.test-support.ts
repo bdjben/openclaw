@@ -109,7 +109,8 @@ describe("runEmbeddedAgent transcript projection retry", () => {
             return makeAttemptResult({
               sessionIdUsed: sessionId,
               beforeAgentFinalizeRevisionReason: "Use the updated room context.",
-              beforeAgentFinalizeRevisionDisableTools: retryKind === "source-finalize",
+              beforeAgentFinalizeRevisionDisableTools:
+                retryKind === "source-finalize" ? true : undefined,
             });
           })
           .mockImplementationOnce(async () => {

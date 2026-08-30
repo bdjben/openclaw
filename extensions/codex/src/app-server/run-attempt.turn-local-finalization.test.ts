@@ -43,101 +43,144 @@ describe("Codex turn-local finalization", () => {
     expect(CODEX_APP_SERVER_VERSION).toBe(VERIFIED_CODEX_STOP_CONTRACT.packageVersion);
   });
 
-  it("routes a revision through the OpenClaw relay at the Codex app-server boundary", async () => {
-    const sessionFile = path.join(tempDir, "turn-local-revise.jsonl");
-    const workspaceDir = path.join(tempDir, "turn-local-revise-workspace");
-    const onAccepted = vi.fn();
-    const onBeforeAgentFinalize = vi.fn(async () => ({
-      action: "revise" as const,
-      instruction: "Use the newer room activity.",
-      disableTools: true as const,
-      onAccepted,
-    }));
-    const params = createParams(sessionFile, workspaceDir);
-    params.onBeforeAgentFinalize = onBeforeAgentFinalize;
-    params.beforeAgentFinalizeRevisionAttempts = 2;
-    params.onAgentEvent = vi.fn();
-    const harness = createStartedThreadHarness();
+  it.each([false, true])(
+    "routes a revision through the OpenClaw relay with disableTools=%s",
+    async (disableTools) => {
+      const sessionFile = path.join(tempDir, "turn-local-revise.jsonl");
+      const workspaceDir = path.join(tempDir, "turn-local-revise-workspace");
+      const onAccepted = vi.fn();
+      const onBeforeAgentFinalize = vi.fn(async () => ({
+        action: "revise" as const,
+        instruction: "Use the newer room activity.",
+        disableTools: true as const,
+        onAccepted,
+      }));
+      const params = createParams(sessionFile, workspaceDir);
+      params.disableTools = disableTools;
+      params.onBeforeAgentFinalize = onBeforeAgentFinalize;
+      params.beforeAgentFinalizeRevisionAttempts = 2;
+      params.onAgentEvent = vi.fn();
+      const harness = createStartedThreadHarness(async (method) => {
+        if (method === "config/read") {
+          return {
+            config: { mcp_servers: { inherited: { command: "example-mcp" } } },
+            layers: [],
+            origins: {},
+          };
+        }
+        if (method === "mcpServerStatus/list") {
+          return {
+            data: [{ name: "inherited", serverInfo: null, tools: {} }],
+            nextCursor: null,
+          };
+        }
+        return undefined;
+      });
 
-    const run = runCodexAppServerAttempt(params, {
-      nativeHookRelay: { enabled: false, events: ["post_tool_use"], gatewayTimeoutMs: 1_000 },
-    });
-    await harness.waitForMethod("turn/start");
-    const startRequest = harness.requests.find((request) => request.method === "thread/start");
-    const startConfig = (startRequest?.params as { config?: Record<string, unknown> } | undefined)
-      ?.config;
-    const stopConfig = startConfig?.["hooks.Stop"] as
-      | Array<{ hooks?: Array<{ command?: string; timeout?: number }> }>
-      | undefined;
-    expect(stopConfig?.[0]?.hooks?.[0]?.timeout).toBe(40);
-    expect(stopConfig?.[0]?.hooks?.[0]?.command).toContain("--timeout 39000");
-    expect(startConfig?.["hooks.PreToolUse"]).toEqual([]);
-    expect(startConfig?.["hooks.PostToolUse"]).toEqual([]);
-    expect(startConfig?.["hooks.PermissionRequest"]).toEqual([]);
-    const relayId = extractRelayIdFromThreadRequest(startRequest?.params);
+      const run = runCodexAppServerAttempt(params, {
+        nativeHookRelay: { enabled: false, events: ["post_tool_use"], gatewayTimeoutMs: 1_000 },
+      });
+      await harness.waitForMethod("turn/start");
+      const startRequest = harness.requests.find((request) => request.method === "thread/start");
+      const startConfig = (startRequest?.params as { config?: Record<string, unknown> } | undefined)
+        ?.config;
+      const stopConfig = startConfig?.["hooks.Stop"] as
+        | Array<{ hooks?: Array<{ command?: string; timeout?: number }> }>
+        | undefined;
+      expect(stopConfig?.[0]?.hooks?.[0]?.timeout).toBe(40);
+      expect(stopConfig?.[0]?.hooks?.[0]?.command).toContain("--timeout 39000");
+      expect(startConfig?.["hooks.PreToolUse"]).toEqual([]);
+      expect(startConfig?.["hooks.PostToolUse"]).toEqual([]);
+      expect(startConfig?.["hooks.PermissionRequest"]).toEqual([]);
+      const relayId = extractRelayIdFromThreadRequest(startRequest?.params);
 
-    await harness.notify({
-      method: "item/completed",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        item: {
-          id: "stale-final",
-          type: "agentMessage",
-          text: "KEEP",
-          status: "completed",
+      await harness.notify({
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "stale-final",
+            type: "agentMessage",
+            text: "KEEP",
+            status: "completed",
+          },
         },
-      },
-    });
-    const stopResponse = await invokeNativeHookRelay({
-      provider: "codex",
-      relayId,
-      event: "before_agent_finalize",
-      rawPayload: {
-        hook_event_name: "Stop",
-        turn_id: "turn-1",
-        model: "gpt-5.4-codex",
-        last_assistant_message: "KEEP",
-      },
-    });
-    expect(stopResponse).toMatchObject({
-      stdout: `${JSON.stringify({ continue: false })}\n`,
-      exitCode: 0,
-    });
-    expect(Object.keys(JSON.parse(stopResponse.stdout) as Record<string, unknown>)).toEqual([
-      "continue",
-    ]);
-    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
-    const result = await run;
+      });
+      const stopResponse = await invokeNativeHookRelay({
+        provider: "codex",
+        relayId,
+        event: "before_agent_finalize",
+        rawPayload: {
+          hook_event_name: "Stop",
+          turn_id: "turn-1",
+          model: "gpt-5.4-codex",
+          last_assistant_message: "KEEP",
+        },
+      });
+      expect(stopResponse).toMatchObject({
+        stdout: `${JSON.stringify({ continue: false })}\n`,
+        exitCode: 0,
+      });
+      expect(Object.keys(JSON.parse(stopResponse.stdout) as Record<string, unknown>)).toEqual([
+        "continue",
+      ]);
+      await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      const result = await run;
 
-    expect(onBeforeAgentFinalize).toHaveBeenCalledWith({
-      runId: "run-1",
-      sessionId: "session-1",
-      sessionKey: "agent:main:session-1",
-      provider: "codex",
-      model: "gpt-5.4-codex",
-      lastAssistantMessage: "KEEP",
-      revisionAttempt: 2,
-    });
-    expect(result).toMatchObject({
-      beforeAgentFinalizeRevisionReason: "Use the newer room activity.",
-      beforeAgentFinalizeRevisionDisableTools: true,
-      assistantTexts: ["KEEP"],
-    });
-    expect(result.lastAssistant).toBeDefined();
-    expect(result.currentAttemptAssistant).toBeDefined();
-    expect(result).not.toHaveProperty("contextEngineTerminalAnchor");
-    expect(
-      result.messagesSnapshot.some((message) => readMirrorIdentity(message) === "turn-1:assistant"),
-    ).toBe(false);
-    expect(JSON.stringify(result.messagesSnapshot)).not.toContain("KEEP");
-    expect(
-      (params.onAgentEvent as ReturnType<typeof vi.fn>).mock.calls.some(
-        ([event]) => (event as { stream?: string }).stream === "assistant",
-      ),
-    ).toBe(false);
-    expect(onAccepted).toHaveBeenCalledOnce();
-  });
+      expect(onBeforeAgentFinalize).toHaveBeenCalledWith({
+        runId: "run-1",
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+        provider: "codex",
+        model: "gpt-5.4-codex",
+        lastAssistantMessage: "KEEP",
+        revisionAttempt: 2,
+      });
+      expect(result).toMatchObject({
+        beforeAgentFinalizeRevisionReason: "Use the newer room activity.",
+        beforeAgentFinalizeRevisionDisableTools: true,
+        assistantTexts: ["KEEP"],
+      });
+      expect(result.lastAssistant).toBeDefined();
+      expect(result.currentAttemptAssistant).toBeDefined();
+      expect(result).not.toHaveProperty("contextEngineTerminalAnchor");
+      expect(
+        result.messagesSnapshot.some(
+          (message) => readMirrorIdentity(message) === "turn-1:assistant",
+        ),
+      ).toBe(false);
+      expect(JSON.stringify(result.messagesSnapshot)).not.toContain("KEEP");
+      expect(
+        (params.onAgentEvent as ReturnType<typeof vi.fn>).mock.calls.some(
+          ([event]) => (event as { stream?: string }).stream === "assistant",
+        ),
+      ).toBe(false);
+      expect(onAccepted).toHaveBeenCalledOnce();
+      expect(startConfig?.["features.hooks"]).toBe(true);
+      expect(startConfig?.["hooks.state"]).toMatchObject({
+        "/<session-flags>/config.toml:stop:0:0": {
+          enabled: true,
+          trusted_hash: expect.any(String),
+        },
+      });
+      if (disableTools) {
+        expect(startConfig).toMatchObject({
+          "tools.experimental_request_user_input.enabled": false,
+          "features.skill_search": false,
+          "features.multi_agent": false,
+          "orchestrator.skills.enabled": false,
+          mcp_servers: { inherited: { enabled: false } },
+        });
+        expect(startRequest?.params).toMatchObject({ dynamicTools: [], environments: [] });
+        const methods = harness.requests.map(({ method }) => method);
+        expect(methods.indexOf("mcpServerStatus/list")).toBeGreaterThan(
+          methods.indexOf("thread/start"),
+        );
+        expect(methods.indexOf("mcpServerStatus/list")).toBeLessThan(methods.indexOf("turn/start"));
+      }
+    },
+  );
 
   it("suppresses a discard before Codex transcript delivery", async () => {
     const sessionFile = path.join(tempDir, "turn-local-discard.jsonl");
