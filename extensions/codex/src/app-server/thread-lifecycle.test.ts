@@ -374,7 +374,7 @@ describe("Codex ring-zero thread config", () => {
         hooks: { Stop: [{ hooks: [{ type: "command", command: "host-stop", async: false }] }] },
         notify: ["notify-completion"],
       };
-      const config = {
+      const inputConfig = {
         ...hookConfig,
         project_doc_max_bytes: 64_000,
         "features.skill_search": true,
@@ -388,7 +388,7 @@ describe("Codex ring-zero thread config", () => {
         developerInstructions,
         hostSystemAgentActive: true,
         nativeCodeModeEnabled: false,
-        config,
+        config: inputConfig,
       });
       const resume = buildThreadResumeParams(params, {
         appServer,
@@ -397,7 +397,7 @@ describe("Codex ring-zero thread config", () => {
         hostSystemAgentActive: true,
         nativeCodeModeEnabled: false,
         threadId: "thread-1",
-        config,
+        config: inputConfig,
       });
 
       expect(start.environments).toEqual([]);

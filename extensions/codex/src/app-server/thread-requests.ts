@@ -45,11 +45,8 @@ const CODEX_CODE_MODE_THREAD_CONFIG: JsonObject = {
   suppress_unstable_features_warning: true,
 };
 
-const CODEX_GOAL_CONTINUATION_DISABLED_THREAD_CONFIG: JsonObject = {
+const CODEX_NATIVE_PLANNING_DISABLED_THREAD_CONFIG: JsonObject = {
   "features.goals": false,
-};
-
-const CODEX_NATIVE_UPDATE_PLAN_DISABLED_THREAD_CONFIG: JsonObject = {
   // OpenClaw owns the durable progress card; Codex's native checklist would create a second owner.
   "tools.update_plan.enabled": false,
 };
@@ -340,12 +337,10 @@ export function buildCodexRuntimeThreadConfig(
     const disabledConfig = mergeCodexThreadConfigs(
       configured,
       CODEX_CODE_MODE_DISABLED_THREAD_CONFIG,
-      CODEX_GOAL_CONTINUATION_DISABLED_THREAD_CONFIG,
-      CODEX_NATIVE_UPDATE_PLAN_DISABLED_THREAD_CONFIG,
+      CODEX_NATIVE_PLANNING_DISABLED_THREAD_CONFIG,
     ) ?? {
       ...CODEX_CODE_MODE_DISABLED_THREAD_CONFIG,
-      ...CODEX_GOAL_CONTINUATION_DISABLED_THREAD_CONFIG,
-      ...CODEX_NATIVE_UPDATE_PLAN_DISABLED_THREAD_CONFIG,
+      ...CODEX_NATIVE_PLANNING_DISABLED_THREAD_CONFIG,
     };
     // Native patch streaming is part of native code mode, so do not send it
     // when runtime policy disables that tool surface.
@@ -356,15 +351,13 @@ export function buildCodexRuntimeThreadConfig(
     const merged = mergeCodexThreadConfigs(
       codeModeConfig,
       configured,
-      CODEX_GOAL_CONTINUATION_DISABLED_THREAD_CONFIG,
-      CODEX_NATIVE_UPDATE_PLAN_DISABLED_THREAD_CONFIG,
+      CODEX_NATIVE_PLANNING_DISABLED_THREAD_CONFIG,
       {
         "features.code_mode_only": true,
       },
     ) ?? {
       ...codeModeConfig,
-      ...CODEX_GOAL_CONTINUATION_DISABLED_THREAD_CONFIG,
-      ...CODEX_NATIVE_UPDATE_PLAN_DISABLED_THREAD_CONFIG,
+      ...CODEX_NATIVE_PLANNING_DISABLED_THREAD_CONFIG,
       "features.code_mode_only": true,
     };
     return ensureDirectOnlyToolNamespaces(merged, options.directOnlyToolNamespaces);
@@ -372,12 +365,10 @@ export function buildCodexRuntimeThreadConfig(
   const merged = mergeCodexThreadConfigs(
     codeModeConfig,
     configured,
-    CODEX_GOAL_CONTINUATION_DISABLED_THREAD_CONFIG,
-    CODEX_NATIVE_UPDATE_PLAN_DISABLED_THREAD_CONFIG,
+    CODEX_NATIVE_PLANNING_DISABLED_THREAD_CONFIG,
   ) ?? {
     ...codeModeConfig,
-    ...CODEX_GOAL_CONTINUATION_DISABLED_THREAD_CONFIG,
-    ...CODEX_NATIVE_UPDATE_PLAN_DISABLED_THREAD_CONFIG,
+    ...CODEX_NATIVE_PLANNING_DISABLED_THREAD_CONFIG,
   };
   return ensureDirectOnlyToolNamespaces(merged, options.directOnlyToolNamespaces);
 }
