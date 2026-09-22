@@ -6,6 +6,7 @@ import { createConfigIO } from "../config/io.factory.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { readPersistedInstalledPluginIndexRowSync } from "../plugins/installed-plugin-index-record-state.js";
 import { readPersistedInstalledPluginIndexSync } from "../plugins/installed-plugin-index-store.js";
+import { withPluginLifecycleLease } from "../plugins/plugin-lifecycle-lease.js";
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import { createColdPluginFixture } from "../plugins/test-helpers/cold-plugin-fixtures.js";
 import { seedInstalledPluginIndex } from "../plugins/test-helpers/installed-plugin-index.js";
@@ -173,6 +174,35 @@ describe("plugins registry recovery", () => {
       expect(readPersistedInstalledPluginIndexRowSync({})).toEqual(before);
       expect(fs.readFileSync(legacyPath, "utf8")).toBe("{ broken");
       expect(output.writeJson).not.toHaveBeenCalled();
+    });
+  });
+
+  it("does not publish refresh success after lease revocation during inspection", async () => {
+    await withOpenClawTestState({ label: "registry-cli-revoked" }, async (state) => {
+      await state.writeConfig({ plugins: { enabled: false } });
+      const configBytes = fs.readFileSync(state.configPath, "utf8");
+      const controller = new AbortController();
+      const registry = await import("../plugins/plugin-registry.js");
+      const inspect = registry.inspectPluginRegistry;
+      const inspection = vi
+        .spyOn(registry, "inspectPluginRegistry")
+        .mockImplementationOnce(async (params) => {
+          const result = await inspect(params);
+          controller.abort();
+          return result;
+        });
+      try {
+        await expect(
+          withPluginLifecycleLease({ signal: controller.signal }, () => refreshRegistry()),
+        ).rejects.toMatchObject({ code: "OPENCLAW_STATE_LEASE_ABORTED" });
+
+        expect(inspection).toHaveBeenCalledOnce();
+        expect(readPersistedInstalledPluginIndexSync()).not.toBeNull();
+        expect(fs.readFileSync(state.configPath, "utf8")).toBe(configBytes);
+        expect(output.writeJson).not.toHaveBeenCalled();
+      } finally {
+        inspection.mockRestore();
+      }
     });
   });
 

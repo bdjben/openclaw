@@ -79,6 +79,7 @@ export async function runPluginsRegistryCommand(opts: PluginRegistryOptions): Pr
         lease,
       });
       const inspection = await inspectPluginRegistry({ config });
+      lease.assertOwned();
       if (inspection.state !== "fresh") {
         const differenceLines = formatDifferences(inspection.differences);
         const message = [
