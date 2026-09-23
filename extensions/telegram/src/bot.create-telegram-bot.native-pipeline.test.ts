@@ -897,6 +897,7 @@ describe("createTelegramBot typed command pipeline", () => {
       cachedAtAdmission.push(await getCachedSticker(sticker.file_unique_id));
       return { text: "Sticker received" };
     });
+    let receiving: Promise<void> | undefined;
     try {
       const bot = createBot(false, true, cfg);
       const receive = async (update: Parameters<typeof bot.handleUpdate>[0]) => {
@@ -906,7 +907,7 @@ describe("createTelegramBot typed command pipeline", () => {
         const wireUpdate = JSON.parse(wireBody) as typeof update;
         await bot.handleUpdate(wireUpdate);
       };
-      const receiving = receive({ update_id: 2800, message });
+      receiving = receive({ update_id: 2800, message });
       await Promise.race([
         describeStarted.promise,
         receiving.then(() => {
@@ -968,6 +969,7 @@ describe("createTelegramBot typed command pipeline", () => {
       expect(apiCalls.mock.calls.filter(([method]) => method === "sendMessage")).toHaveLength(3);
     } finally {
       description.resolve({ text: "A curious sticker" });
+      await Promise.allSettled([receiving]);
       setTelegramRuntime(runtime);
     }
   });
