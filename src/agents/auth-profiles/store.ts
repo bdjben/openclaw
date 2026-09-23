@@ -14,7 +14,7 @@ import { deferSqlitePostCommitPublication } from "../../infra/sqlite-post-commit
 import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import { readUserModelAuthProfile } from "../../state/user-model-accounts.js";
 import { isRecord, resolveUserPath } from "../../utils.js";
-import { cloneAuthProfileStore } from "./clone.js";
+import { areAuthProfileStoresEqual, cloneAuthProfileStore } from "./clone.js";
 import { AUTH_STORE_VERSION, authProfilesLog } from "./constants.js";
 import {
   syncPersistedExternalCliAuthProfiles,
@@ -1687,7 +1687,7 @@ export function createAuthProfileStoreRuntime(
         next: store,
         existing: runtimeStore,
       });
-      if (!isDeepStrictEqual(materialized, runtimeStore)) {
+      if (!areAuthProfileStoresEqual(materialized, runtimeStore)) {
         updateRuntimeAuthProfileStoreSnapshot(materialized, effectiveAgentDir);
       }
       return store;
