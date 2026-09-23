@@ -899,23 +899,18 @@ describe("createTelegramBot typed command pipeline", () => {
     });
     try {
       const bot = createBot(false, true, cfg);
-      const webhook = webhookCallback(bot, "std/http");
       const receive = async (update: Parameters<typeof bot.handleUpdate>[0]) => {
-        // grammY requires undefined at the reply leaf; Telegram JSON omits it.
-        const response = await webhook(
-          new Request("http://localhost/telegram", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(update),
-          }),
-        );
-        expect(response.status).toBe(200);
+        // Production webhook ingress acknowledges the durable queue before this handler runs.
+        // Keep Telegram's JSON leaf shape while exercising the drain's processing entry point.
+        const wireBody = JSON.stringify(update);
+        const wireUpdate = JSON.parse(wireBody) as typeof update;
+        await bot.handleUpdate(wireUpdate);
       };
       const receiving = receive({ update_id: 2800, message });
       await Promise.race([
         describeStarted.promise,
         receiving.then(() => {
-          throw new Error("Sticker webhook completed before description started");
+          throw new Error("Sticker update completed before description started");
         }),
       ]);
       expect(harness.replySpy).not.toHaveBeenCalled();
