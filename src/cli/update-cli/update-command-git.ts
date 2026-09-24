@@ -25,8 +25,12 @@ import {
   verifyPackageUpdateRecovery,
   resolveGlobalInstallTarget,
   resolveNpmLifecyclePolicyGate,
+  type ResolvedGlobalInstallTarget,
 } from "../../infra/update-global.js";
-import { UPDATE_RUNNER_TIMEOUT_MS } from "../../infra/update-run-timeouts.js";
+import {
+  DEFAULT_UPDATE_STEP_TIMEOUT_MS,
+  UPDATE_RUNNER_TIMEOUT_MS,
+} from "../../infra/update-run-timeouts.js";
 import {
   buildUpdateCommandRunner,
   normalizeFallbackFailureReason,
@@ -62,8 +66,6 @@ import {
   runPackageUpdateDoctor,
 } from "./update-command-package.js";
 import { gatewayServiceCommandUsesRoot } from "./update-command-service-plan.js";
-
-const DEFAULT_UPDATE_STEP_TIMEOUT_MS = 30 * 60_000;
 
 export async function retireStandaloneGitWrapper(params: {
   previousRoot: string;
@@ -176,7 +178,7 @@ async function runReadOnlyGitCommand(params: {
 type RemoteRevisionResolution =
   | { status: "ok"; revision: string }
   | { status: "missing" }
-  | { status: "unreadable"; reason: string };
+  | { status: "unreadable"; reason: string; failureCode?: "target-git-cache-stale" };
 
 async function listGitRemotes(params: {
   runCommand: GlobalCommandRunner;
@@ -245,7 +247,8 @@ async function resolveCurrentRemoteBranchRevision(params: {
     ? { status: "ok", revision: remoteRevision }
     : {
         status: "unreadable",
-        reason: `current remote target ${remote}/${branch} is not available in the local checkout`,
+        reason: `cached ${trackingRef} differs from current remote ${remote}/${branch}`,
+        failureCode: "target-git-cache-stale",
       };
 }
 
@@ -334,7 +337,11 @@ export async function inspectGitDryRunTargetSchemaVersions(params: {
   timeoutMs: number;
   channel: UpdateChannel;
   devTarget?: DevUpdateTarget;
-}): Promise<{ schemaVersions?: OpenClawSchemaVersions; metadataUnreadable?: string }> {
+}): Promise<{
+  schemaVersions?: OpenClawSchemaVersions;
+  metadataUnreadable?: string;
+  failureCode?: "target-git-cache-stale";
+}> {
   const runCommand: GlobalCommandRunner = (argv, options) =>
     runCommandWithTimeout(argv, {
       ...options,
@@ -368,17 +375,8 @@ export async function inspectGitDryRunTargetSchemaVersions(params: {
     const needsCheckoutMain = branch !== DEV_BRANCH;
     let remoteBranchRefs: string[] = [];
     if (needsCheckoutMain) {
-      const remoteResult = await runCommand(["git", "-C", params.root, "remote"], {
-        cwd: params.root,
-        timeoutMs: params.timeoutMs,
-      }).catch(() => null);
-      if (remoteResult?.code === 0) {
-        remoteBranchRefs = remoteResult.stdout
-          .split("\n")
-          .map((remote) => remote.trim())
-          .filter(Boolean)
-          .map((remote) => `refs/remotes/${remote}/${DEV_BRANCH}`);
-      }
+      const { remotes = [] } = await listGitRemotes({ runCommand, ...params });
+      remoteBranchRefs = remotes.map((remote) => `refs/remotes/${remote}/${DEV_BRANCH}`);
     }
     for (const candidate of resolveDevUpstreamRefs(needsCheckoutMain, remoteBranchRefs)) {
       const resolved = await resolveCurrentRemoteBranchRevision({
@@ -392,7 +390,7 @@ export async function inspectGitDryRunTargetSchemaVersions(params: {
         break;
       }
       if (resolved.status === "unreadable") {
-        return { metadataUnreadable: resolved.reason };
+        return { metadataUnreadable: resolved.reason, failureCode: resolved.failureCode };
       }
     }
   }
@@ -432,7 +430,10 @@ export async function updateGitInstall(params: {
   jsonMode?: boolean;
   invocationCwd?: string;
   nodeRunner?: string;
-  inspectGitTarget: UpdateRunnerOptions["inspectGitTarget"];
+  inspectGitTarget: (
+    target: Parameters<UpdateRunnerOptions["inspectGitTarget"]>[0],
+    installTarget?: ResolvedGlobalInstallTarget,
+  ) => Promise<void>;
 }): Promise<UpdateRunResult> {
   let updateRoot = params.switchToGit ? resolveGitInstallDir() : params.root;
   const effectiveTimeout = params.timeoutMs ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS;
@@ -544,7 +545,7 @@ export async function updateGitInstall(params: {
                 params.assertCurrent?.();
               }
             : params.beforeGitMutation,
-        inspectGitTarget: params.inspectGitTarget,
+        inspectGitTarget: (target) => params.inspectGitTarget(target, installTarget ?? undefined),
         beforeGitStaging: params.switchToGit
           ? undefined
           : async () => ({

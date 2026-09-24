@@ -54,6 +54,7 @@ import {
 } from "./thread-lifecycle.js";
 import {
   createLeasedCodexLifecycleHarness,
+  createThreadRequestAppServerOptions as createAppServerOptions,
   disabledMcpServerStatus,
   writeNativeCatalogFixture,
 } from "./thread-lifecycle.test-fixtures.js";
@@ -889,14 +890,6 @@ function createAttemptParams(params: {
         : {}),
     },
   } as EmbeddedRunAttemptParams;
-}
-
-function createAppServerOptions() {
-  return {
-    approvalPolicy: "on-request",
-    approvalsReviewer: "user",
-    sandbox: "workspace-write",
-  };
 }
 
 function createNetworkProxyAppServerOptions() {
@@ -2356,22 +2349,18 @@ describe("Codex app-server turn input image sanitizing", () => {
     );
   });
 
-  it("places memory collaboration instructions before skills", () => {
+  it("places workspace collaboration instructions before memory", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
       threadId: "thread-1",
       cwd: "/repo",
       appServer: createAppServerOptions() as never,
       turnScopedDeveloperInstructions: "SOUL.md turn-only context",
       memoryCollaborationInstructions: "MEMORY.md pointer",
-      skillsCollaborationInstructions: "<available_skills>",
     });
     const developerInstructions = request.collaborationMode?.settings.developer_instructions ?? "";
 
     expect(developerInstructions.indexOf("SOUL.md turn-only context")).toBeLessThan(
       developerInstructions.indexOf("MEMORY.md pointer"),
-    );
-    expect(developerInstructions.indexOf("MEMORY.md pointer")).toBeLessThan(
-      developerInstructions.indexOf("<available_skills>"),
     );
   });
 

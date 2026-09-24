@@ -72,7 +72,7 @@ export async function ensureCodexManagedBundledMarketplace(params: {
     await active.promise.catch(() => undefined);
     return await ensureCodexManagedBundledMarketplace(params);
   }
-  const install = reconcileManagedWrapper({
+  const install = publishManagedWrapper({
     parent,
     physicalTargetPath,
     targetPath,
@@ -92,21 +92,6 @@ export async function ensureCodexManagedBundledMarketplace(params: {
   return await install;
 }
 
-async function reconcileManagedWrapper(
-  params: Parameters<typeof publishManagedWrapper>[0],
-): Promise<string> {
-  if (
-    await wrapperMatches(
-      params.physicalTargetPath,
-      params.source.bundledMarketplacePath,
-      params.unifiedRuntime,
-    )
-  ) {
-    return params.targetPath;
-  }
-  return await publishManagedWrapper(params);
-}
-
 async function publishManagedWrapper(params: {
   parent: Awaited<ReturnType<typeof prepareOwnedServiceParent>>;
   physicalTargetPath: string;
@@ -118,6 +103,11 @@ async function publishManagedWrapper(params: {
 }): Promise<string> {
   const { parent, physicalTargetPath, targetPath, source, ownershipCandidates, assertCurrent } =
     params;
+  if (
+    await wrapperMatches(physicalTargetPath, source.bundledMarketplacePath, params.unifiedRuntime)
+  ) {
+    return targetPath;
+  }
 
   const stagingPath = await fs.mkdtemp(path.join(parent.realPath, `.${MARKETPLACE_NAME}.staging-`));
   const backupPath = path.join(
