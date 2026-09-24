@@ -11,6 +11,7 @@ import { readCodexDesktopArtifactTreeFingerprint } from "./desktop-generation-fi
 
 export const UNIFIED_COMPUTER_USE_PLUGIN = "unified-computer-use";
 const UNIFIED_SERVER = "cua_repl";
+const CUA_REPL_ENTRY = "@oai/cua/tinyskyAlt";
 
 export type CodexUnifiedComputerUseRuntime = {
   pluginRoot: string;
@@ -116,7 +117,7 @@ export async function resolveCodexUnifiedComputerUseRuntime(
             NODE_REPL_NODE_MODULE_DIRS: modules,
             NODE_REPL_TRUSTED_CODE_PATHS: [codexHome, modules].join(path.delimiter),
             NODE_REPL_TRUSTED_SERVICES: JSON.stringify({ sky: "@oai/sky/service" }),
-            NODE_REPL_JS_BANNER: 'await import("@oai/cua/tinyskyAlt");',
+            NODE_REPL_JS_BANNER: `await import(${JSON.stringify(CUA_REPL_ENTRY)});`,
             SKY_CUA_SERVICE_PATH: path.join(codexHome, "computer-use", "Codex Computer Use.app"),
           },
         },
