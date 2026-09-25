@@ -250,6 +250,19 @@ async function wrapperMatches(
     return false;
   }
   const plugins = await fs.lstat(path.join(targetPath, "plugins"));
+  if (unifiedRuntime && plugins.isDirectory()) {
+    const [sourceEntries, targetEntries] = await Promise.all([
+      fs.readdir(path.join(sourcePath, "plugins")),
+      fs.readdir(path.join(targetPath, "plugins")),
+    ]);
+    const sourceNames = new Set(sourceEntries);
+    if (
+      sourceNames.size !== targetEntries.length ||
+      targetEntries.some((name) => !sourceNames.has(name))
+    ) {
+      return false;
+    }
+  }
   return unifiedRuntime
     ? plugins.isDirectory() &&
         (await fs

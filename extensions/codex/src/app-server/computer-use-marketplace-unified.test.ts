@@ -153,6 +153,47 @@ describe("managed unified Computer Use marketplace", () => {
     expect(await fs.readFile(targetHook, "utf8")).toBe("updated official hook");
   });
 
+  it("publishes newly added sibling plugins without a unified runtime change", async () => {
+    const root = tempDirs.make("openclaw-unified-computer-use-sibling-");
+    const candidate = await writeUnifiedCandidate(root);
+    const codexHome = path.join(root, "agent", "codex-home");
+    const params = { codexHome, ownershipRoot: path.dirname(codexHome), candidates: [candidate] };
+    const target = await ensureCodexManagedBundledMarketplace(params);
+    if (!target) {
+      throw new Error("Expected the managed source to be published");
+    }
+
+    const siblingSource = "./plugins/new-sibling";
+    const siblingManifest = { name: "new-sibling", version: "1.0.0" };
+    const sourcePlugin = path.join(candidate.bundledMarketplacePath, siblingSource);
+    await fs.mkdir(path.join(sourcePlugin, ".codex-plugin"), { recursive: true });
+    await fs.writeFile(
+      path.join(sourcePlugin, ".codex-plugin", "plugin.json"),
+      JSON.stringify(siblingManifest),
+    );
+    const manifestPath = path.join(target, ".agents", "plugins", "marketplace.json");
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    manifest.plugins.push({
+      name: siblingManifest.name,
+      source: { source: "local", path: siblingSource },
+    });
+    await fs.writeFile(manifestPath, JSON.stringify(manifest));
+
+    await expect(ensureCodexManagedBundledMarketplace(params)).resolves.toBe(target);
+    const publishedManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    const sibling = publishedManifest.plugins.find(
+      (plugin: { name: string }) => plugin.name === siblingManifest.name,
+    );
+    expect(
+      JSON.parse(
+        await fs.readFile(
+          path.join(target, sibling.source.path, ".codex-plugin", "plugin.json"),
+          "utf8",
+        ),
+      ),
+    ).toEqual(siblingManifest);
+  });
+
   it("retains explicit legacy native server and per-tool policy boundaries", () => {
     expect(
       hasLegacyCodexComputerUseMcpPolicy({ mcp_servers: { "computer-use": { enabled: false } } }),
