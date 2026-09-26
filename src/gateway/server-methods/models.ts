@@ -10,6 +10,7 @@ import {
   validateModelsListParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { tryResolveAmbientOwnerAgentId } from "../../agents/agent-scope-config.js";
+import { refreshExpiredPreparedModelCatalog } from "../../agents/prepared-model-catalog.js";
 import { PreparedModelRuntimePublicationSupersededError } from "../../agents/prepared-model-runtime.errors.js";
 import { roleScopesAllow } from "../../shared/operator-scope-compat.js";
 import { ModelAccountConnectAuthorityError } from "../model-account-connect.js";
@@ -23,6 +24,7 @@ import { resolveChatMetadataReadParams } from "./chat-metadata-handler.js";
 import { projectSessionModelCatalog } from "./chat-metadata-session-projection.js";
 import { buildModelsListResult } from "./models-list-result.js";
 import type { GatewayRequestHandlers } from "./types.js";
+import { preparePersonalModelAccountSelection } from "./users-model-account-access.js";
 import { assertValidParams } from "./validation.js";
 export { buildModelsListResult };
 
@@ -37,7 +39,17 @@ export const modelsHandlers: GatewayRequestHandlers = {
     let publicationScope: ChatMetadataReadParams | undefined;
     try {
       const scoped = Boolean(params.sessionKey || params.authProfileId);
-      scope = scoped ? resolveChatMetadataReadParams(options, params) : undefined;
+      const draftAccountSelection =
+        !params.sessionKey && params.authProfileId
+          ? await preparePersonalModelAccountSelection(
+              options,
+              params.authProfileId,
+              SESSION_READ_SCOPE,
+            )
+          : undefined;
+      scope = scoped
+        ? resolveChatMetadataReadParams(options, params, draftAccountSelection)
+        : undefined;
       if (scoped && !scope) {
         return;
       }
@@ -82,6 +94,9 @@ export const modelsHandlers: GatewayRequestHandlers = {
         scope ?? resolveChatMetadataReadParams(options, { agentId: resolved.agentId });
       if (!publicationScope) {
         return;
+      }
+      if (params.refresh !== true) {
+        refreshExpiredPreparedModelCatalog({ agentId: resolved.agentId, config: cfg });
       }
       const result = await buildModelsListResult({
         source: { kind: "gateway", context },

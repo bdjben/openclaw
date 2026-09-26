@@ -1,6 +1,6 @@
 import path from "node:path";
 import { readAgentDatabaseAdmissionRefusal } from "../../state/agent-database-admission.js";
-import { isSameOpenClawAgentDatabasePath } from "../../state/openclaw-agent-db-registry.js";
+import { isSameOpenClawAgentDatabasePath } from "../../state/openclaw-agent-db.paths.js";
 import { resolveSharedAuthStoreOwnership, resolveSharedAuthStorePath } from "./path-resolve.js";
 import { mergeLocalAuthProfileStoreWithInheritedStore } from "./runtime-snapshot-owner.js";
 import { getRuntimeAuthProfileStoreSnapshotAtDatabasePath } from "./runtime-snapshots.js";

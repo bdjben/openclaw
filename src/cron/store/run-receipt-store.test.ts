@@ -1,10 +1,15 @@
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createOperationalRunInstanceRef,
   prepareAgentRunAdmission,
   type AdmittedRunContext,
 } from "../../agents/admitted-run-context.js";
+import { isAgentDeletionBlocked } from "../../agents/agent-lifecycle-registry.js";
 import { createExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
+import * as nodeSqlite from "../../infra/node-sqlite.js";
 import * as pidAlive from "../../shared/pid-alive.js";
 import { recordAgentDatabaseAdmissions } from "../../state/agent-database-admission.js";
 import { closeOpenClawStateDatabaseByPath } from "../../state/openclaw-state-db-cache.js";
@@ -12,6 +17,7 @@ import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
 } from "../../state/openclaw-state-db.js";
+import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import {
   advanceCronActiveJobGeneration,
   bindCronJobAdmittedRun,
@@ -27,6 +33,7 @@ import { setupCronServiceSuite } from "../service.test-harness.js";
 import { update } from "../service/ops-mutations.js";
 import {
   assertServiceCronRunReceiptCurrent,
+  cronRunReceiptPersistHooks,
   markServiceCronJobActive,
 } from "../service/run-receipts.js";
 import {
@@ -58,7 +65,60 @@ import type { CronRunReceiptHandle } from "./run-receipt.types.js";
 
 const { logger, makeStorePath } = setupCronServiceSuite({ prefix: "cron-run-receipt-" });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  syncBuiltinESMExports();
+});
+
+it.each(["implicit", "supplied"] as const)(
+  "checks receipt availability with the %s transaction without spawning or opening another database",
+  async (source) => {
+    const { storePath } = await makeStorePath();
+    const job = makeJob("transaction-availability");
+    await saveCronStore(storePath, { version: 1, jobs: [job] });
+    const handle = claim(storePath, job, 1);
+    const state = createCronServiceState({
+      scheduler: createTestGatewayScheduler(),
+      nowMs: () => Date.now(),
+      storePath,
+      cronEnabled: true,
+      log: logger,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob: vi.fn(),
+      isAgentAvailable: (agentId, database) => {
+        if (source === "supplied") {
+          expect(database?.isTransaction).toBe(true);
+        }
+        return !isAgentDeletionBlocked(agentId, {}, source === "supplied" ? database : undefined);
+      },
+    });
+    const hooks = cronRunReceiptPersistHooks({ state, handle });
+    const spawn = vi.spyOn(childProcess, "spawnSync");
+    syncBuiltinESMExports();
+    const open = vi.spyOn(nodeSqlite, "openNodeSqliteDatabase");
+    let connections = 0;
+    const start = performance.now();
+    for (let index = 0; index < 3; index += 1) {
+      runOpenClawStateWriteTransaction(({ db }) => {
+        const before = open.mock.calls.length;
+        hooks.beforeWrite?.(db);
+        connections += open.mock.calls.length - before;
+      });
+    }
+    console.info(
+      JSON.stringify({
+        receiptGuards: 3,
+        source,
+        elapsedMs: performance.now() - start,
+        spawns: spawn.mock.calls.length,
+        connections,
+      }),
+    );
+    expect(spawn.mock.calls.length).toBe(0);
+    expect(connections).toBe(0);
+  },
+);
 
 function makeJob(id: string, agentId = "alpha"): CronJob {
   return {
@@ -207,6 +267,8 @@ describe("cron run receipt store", () => {
       await saveCronStore(storePath, { version: 1, jobs: [job] });
       const receipt = claim(storePath, job, Date.now());
       const state = createCronServiceState({
+        scheduler: createTestGatewayScheduler(),
+        nowMs: () => Date.now(),
         storePath,
         cronEnabled: true,
         log: logger,
@@ -365,7 +427,7 @@ describe("cron run receipt store", () => {
       } finally {
         admission.close();
         if (state.timer) {
-          clearTimeout(state.timer);
+          state.timer.cancel();
         }
         finishCronRunReceipt({ handle: receipt, status: "ok", finishedAtMs: Date.now() });
         resetCronActiveJobs();
@@ -463,6 +525,7 @@ describe("cron run receipt store", () => {
         liveReceipt = makeForeignOwner(receipt).handle;
       }
       const state = createCronServiceState({
+        scheduler: createTestGatewayScheduler(),
         storePath,
         cronEnabled: true,
         log: logger,
@@ -687,6 +750,7 @@ describe("cron run receipt store", () => {
     await saveCronStore(storePath, { version: 1, jobs: [job] });
     const foreign = makeForeignOwner(claim(storePath, job, startedAtMs));
     const state = createCronServiceState({
+      scheduler: createTestGatewayScheduler(),
       storePath,
       cronEnabled: true,
       log: logger,

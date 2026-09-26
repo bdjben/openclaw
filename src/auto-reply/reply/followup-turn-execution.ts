@@ -67,7 +67,7 @@ function buildFollowupTemplateContext(turn: AdmittedFollowupTurn): TemplateConte
     InputProvenance: run.inputProvenance,
     InboundEventKind: queued.currentInboundEventKind,
     media: queued.media,
-  } as TemplateContext;
+  };
 }
 
 /** Adapts an admitted queued turn to the canonical agent execution owner. */
@@ -183,17 +183,17 @@ export async function executeFollowupTurn(params: {
             }
           })
       : undefined;
-  const wrapVisibility = <T>(
-    callback: ((value: T) => Promise<boolean | void> | boolean | void) | undefined,
+  const wrapVisibility = <Args extends unknown[]>(
+    callback: ((...args: Args) => Promise<boolean | void> | boolean | void) | undefined,
     allowed = progressAllowed,
   ) =>
     callback
-      ? (value: T) =>
+      ? (...args: Args) =>
           enqueueProgressResult(async () => {
             if (!allowed()) {
               return false;
             }
-            return (await settleProgressVisibilityCallbackResult(callback(value))).visible;
+            return (await settleProgressVisibilityCallbackResult(callback(...args))).visible;
           })
       : undefined;
   const baseTypingSignals = createTypingSignaler({
@@ -249,34 +249,11 @@ export async function executeFollowupTurn(params: {
     onPlanUpdate: wrapVisibility(sourceOpts?.onPlanUpdate),
     onApprovalEvent: wrapVisibility(sourceOpts?.onApprovalEvent, shouldEmitStructuredProgress),
     onPatchSummary: wrapVisibility(sourceOpts?.onPatchSummary, shouldEmitStructuredProgress),
-    onCompactionStart: sourceOpts?.onCompactionStart
-      ? () =>
-          enqueueProgressResult(async () =>
-            progressAllowed()
-              ? (await settleProgressVisibilityCallbackResult(sourceOpts.onCompactionStart!()))
-                  .visible
-              : false,
-          )
-      : undefined,
-    onCompactionEnd: sourceOpts?.onCompactionEnd
-      ? (payload) =>
-          enqueueProgressResult(async () =>
-            progressAllowed()
-              ? (await settleProgressVisibilityCallbackResult(sourceOpts.onCompactionEnd!(payload)))
-                  .visible
-              : false,
-          )
-      : undefined,
+    onCompactionStart: wrapVisibility(sourceOpts?.onCompactionStart),
+    onCompactionEnd: wrapVisibility(sourceOpts?.onCompactionEnd),
     onReasoningStream: wrapVisibility(sourceOpts?.onReasoningStream),
     onReasoningProgress: wrap(sourceOpts?.onReasoningProgress),
-    onReasoningEnd: sourceOpts?.onReasoningEnd
-      ? () =>
-          enqueueProgressResult(async () =>
-            progressAllowed()
-              ? (await settleProgressVisibilityCallbackResult(sourceOpts.onReasoningEnd!())).visible
-              : false,
-          )
-      : undefined,
+    onReasoningEnd: wrapVisibility(sourceOpts?.onReasoningEnd),
     onToolResult: async (payload) => {
       return await enqueueProgressResult(async () => {
         if (!progressAllowed()) {

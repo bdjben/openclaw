@@ -14,8 +14,12 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { queuePluginSessionsChanged } from "../plugins/gateway-events.js";
 import { operatorScopeSatisfied } from "../shared/operator-scope-compat.js";
 import { isBrowserCopilotClient } from "../utils/message-channel.js";
-import { ADMIN_SCOPE, QUESTIONS_SCOPE, READ_SCOPE, WRITE_SCOPE } from "./method-scopes.js";
-import { hasEventScope, modelMetadataInvalidationFragment } from "./server-broadcast-scopes.js";
+import { ADMIN_SCOPE, QUESTIONS_SCOPE, READ_SCOPE, WRITE_SCOPE } from "./operator-scopes.js";
+import {
+  hasEventScope,
+  isSessionReadInvalidation,
+  modelMetadataInvalidationFragment,
+} from "./server-broadcast-scopes.js";
 import type {
   GatewayBroadcastFn,
   GatewayBroadcastOpts,
@@ -167,6 +171,7 @@ type ClientDelivery = {
 
 export function createGatewayBroadcaster(params: {
   clients: GatewayClientRegistry;
+  // Reused arrays are immutable snapshots; the projection still checks each recipient's authority.
   preparePresenceProjection?: (
     presence: SystemPresence[],
   ) => (client: GatewayWsClient) => SystemPresence[];
@@ -286,7 +291,17 @@ export function createGatewayBroadcaster(params: {
     // The bounded signal has no caller-provided serialization or model/config data.
     const metadataInvalidation =
       event === "chat.metadata.changed" ? modelMetadataInvalidationFragment(payload) : undefined;
+    let sessionReadContext: boolean | undefined;
+    const hasSessionReadContext = () =>
+      (sessionReadContext ??=
+        (event === "users.prefs.changed" && isTargeted) ||
+        (params.canReceiveSessionEvent !== undefined &&
+          sessionKeys.length > 0 &&
+          sessionKeys.every((key) => key.trim().length > 0)) ||
+        metadataInvalidation !== undefined ||
+        isSessionReadInvalidation(event, payload, isTargeted));
     let projectPresence: ((client: GatewayWsClient) => SystemPresence[]) | undefined;
+    let presenceFragments: Map<SystemPresence[], string> | undefined;
     let projectSession: ((client: GatewayWsClient) => unknown) | undefined;
     let skipSourcePayload = false;
     let sessionProjectionPrepared = false;
@@ -355,7 +370,7 @@ export function createGatewayBroadcaster(params: {
       const ownRunQuestion =
         questionRecipient !== undefined &&
         !operatorScopeSatisfied(QUESTIONS_SCOPE, c.connect.scopes ?? []);
-      if (!hasEventScope(c, event, explicitPluginScope, ownRunQuestion)) {
+      if (!hasEventScope(c, event, explicitPluginScope, ownRunQuestion, hasSessionReadContext)) {
         continue;
       }
       if (
@@ -582,10 +597,15 @@ export function createGatewayBroadcaster(params: {
             throw new Error("presence recipient projection unavailable");
           }
           projectPresence ??= params.preparePresenceProjection(presencePayload.presence);
-          payloadFragment = serializeFrameField("payload", {
-            ...presencePayload,
-            presence: projectPresence(c),
-          });
+          // Preserve source reads before checking the recipient's current authority.
+          const projectedPayload = { ...presencePayload, presence: projectPresence(c) };
+          const reusable =
+            Object.keys(projectedPayload).length === 1 && !("toJSON" in projectedPayload);
+          const cached = reusable ? presenceFragments?.get(projectedPayload.presence) : undefined;
+          payloadFragment = cached ?? serializeFrameField("payload", projectedPayload);
+          if (reusable && cached === undefined) {
+            (presenceFragments ??= new Map()).set(projectedPayload.presence, payloadFragment);
+          }
         }
         if (projectSession) {
           const projected = projectSession(c);
