@@ -121,9 +121,13 @@ export function resolveMatrixAccountConfig(params: {
       | undefined,
     accountId,
     normalizeAccountId,
-    nestedObjectKeys: ["dm", "actions", "execApprovals", "botLoopProtection"],
+    nestedObjectKeys: ["dm", "actions", "execApprovals", "botLoopProtection", "streaming"],
   });
   const accountConfig = findMatrixAccountConfig(params.cfg, accountId);
+  const streamingRooms = {
+    ...base.streaming?.rooms,
+    ...accountConfig?.streaming?.rooms,
+  };
   const groups = mergeMatrixRoomEntries(
     selectInheritedMatrixRoomEntries({
       entries: base.groups,
@@ -144,6 +148,9 @@ export function resolveMatrixAccountConfig(params: {
   const { groups: _ignoredGroups, rooms: _ignoredRooms, ...rest } = merged;
   return {
     ...rest,
+    ...(Object.keys(streamingRooms).length > 0
+      ? { streaming: { ...merged.streaming, rooms: streamingRooms } }
+      : {}),
     ...(groups ? { groups } : {}),
     ...(rooms ? { rooms } : {}),
   };

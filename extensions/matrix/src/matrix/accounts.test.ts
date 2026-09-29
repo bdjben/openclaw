@@ -160,6 +160,47 @@ function configWithMatrix(matrix: MatrixConfig): CoreConfig {
 }
 
 describe("resolveMatrixAccount", () => {
+  it("keeps channel streaming defaults when an account adds only a room override", () => {
+    const cfg: CoreConfig = {
+      channels: {
+        matrix: {
+          streaming: { mode: "progress", preview: { toolProgress: false } },
+          accounts: { work: { streaming: { rooms: { "!room:example.org": { mode: "off" } } } } },
+        },
+      },
+    };
+    expect(resolveMatrixAccount({ cfg, accountId: "work" }).config.streaming).toEqual({
+      mode: "progress",
+      preview: { toolProgress: false },
+      rooms: { "!room:example.org": { mode: "off" } },
+    });
+  });
+
+  it("inherits channel room streaming overrides with account defaults and room overrides", () => {
+    const cfg: CoreConfig = {
+      channels: {
+        matrix: {
+          streaming: {
+            mode: "progress",
+            rooms: {
+              "!base:example.org": { mode: "off" },
+              "!shared:example.org": { mode: "partial" },
+            },
+          },
+          accounts: {
+            work: {
+              streaming: { mode: "quiet", rooms: { "!shared:example.org": { mode: "off" } } },
+            },
+          },
+        },
+      },
+    };
+    expect(resolveMatrixAccount({ cfg, accountId: "work" }).config.streaming).toEqual({
+      mode: "quiet",
+      rooms: { "!base:example.org": { mode: "off" }, "!shared:example.org": { mode: "off" } },
+    });
+  });
+
   let prevEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {

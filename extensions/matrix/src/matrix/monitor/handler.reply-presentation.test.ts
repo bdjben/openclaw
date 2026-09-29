@@ -248,6 +248,28 @@ describe("matrix monitor handler reply presentation", () => {
     }
   });
 
+  it("does not admit an allowlist room with only a streaming override", async () => {
+    const dispatchInboundMessage = vi.fn();
+    const { handler } = createMatrixHandlerTestHarness({
+      accountConfig: {
+        streaming: { mode: "off", rooms: { "!denied:example.org": { mode: "progress" } } },
+      },
+      groupPolicy: "allowlist",
+      isDirectMessage: false,
+      roomsConfig: { "!allowed:example.org": { requireMention: false } },
+      dispatchInboundMessage,
+    });
+    await handler(
+      "!denied:example.org",
+      createMatrixTextMessageEvent({ eventId: "$denied", body: "hello" }),
+    );
+    expect(dispatchInboundMessage).not.toHaveBeenCalled();
+    expect(sendSingleTextMessageMatrixMock).not.toHaveBeenCalled();
+    expect(sendMessageMatrixMock).not.toHaveBeenCalled();
+    expect(reactMatrixMessageMock).not.toHaveBeenCalled();
+    expect(deliverMatrixRepliesMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       name: "disables account previews in an overridden room",
@@ -309,12 +331,13 @@ describe("matrix monitor handler reply presentation", () => {
     const captured = createDeferred<GetReplyOptions>();
     const runGate = createDeferred<void>();
     const { handler } = createMatrixHandlerTestHarness({
-      accountConfig: { streaming: { mode: accountMode } },
+      accountConfig: {
+        streaming: { mode: accountMode, rooms: { "!override:example.org": { mode: roomMode } } },
+      },
       streaming: accountMode,
       previewToolProgressEnabled: accountMode === "partial",
       roomsConfig: {
         "*": { requireMention: false },
-        "!override:example.org": { requireMention: false, streaming: { mode: roomMode } },
       },
       isDirectMessage,
       dispatchInboundMessage: vi.fn(async (args: { replyOptions?: GetReplyOptions }) => {

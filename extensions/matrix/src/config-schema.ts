@@ -57,10 +57,7 @@ const botLoopProtectionSchema = z
 
 const matrixStreamingModeSchema = z.enum(["partial", "quiet", "progress", "off"]);
 
-const matrixRoomStreamingSchema = z
-  .object({ mode: matrixStreamingModeSchema.optional() })
-  .strict()
-  .optional();
+const matrixRoomStreamingSchema = z.object({ mode: matrixStreamingModeSchema.optional() }).strict();
 
 export const matrixRoomSchema = buildGroupEntrySchema({
   requireMentionInBotThreads: z.boolean().optional(),
@@ -69,7 +66,6 @@ export const matrixRoomSchema = buildGroupEntrySchema({
   botLoopProtection: botLoopProtectionSchema,
   autoReply: z.boolean().optional(),
   users: AllowFromListSchema,
-  streaming: matrixRoomStreamingSchema,
 })
   .omit({ toolsBySender: true, allowFrom: true })
   .strict()
@@ -85,6 +81,12 @@ const matrixNetworkSchema = z
 export const matrixStreamingSchema = z
   .object({
     mode: matrixStreamingModeSchema.optional(),
+    rooms: z
+      .record(
+        z.string().regex(/^![^:]+:.+$/, "Expected a Matrix room ID"),
+        matrixRoomStreamingSchema,
+      )
+      .optional(),
     chunkMode: z.enum(["length", "newline"]).optional(),
     block: z
       .object({

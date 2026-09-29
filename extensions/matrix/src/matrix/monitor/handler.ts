@@ -39,7 +39,6 @@ import { loadMatrixSendModule } from "./handler-runtime.js";
 import { createMatrixHandlerState } from "./handler-state.js";
 import type { MatrixHandlerRuntimeConfig, MatrixMonitorHandlerParams } from "./handler-types.js";
 import { createRoomHistoryTracker } from "./room-history.js";
-import { resolveMatrixRoomConfig } from "./rooms.js";
 import { resolveMatrixPreviewToolProgressEnabled } from "./streaming.js";
 import type { MatrixRawEvent } from "./types.js";
 import { EventType } from "./types.js";
@@ -273,16 +272,8 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         botLoopProtection,
       } = resolvedIngressResult;
 
-      // Group rooms use the config selected by ingress. DMs can opt in by exact room ID
-      // without making the group-room wildcard an implicit DM streaming override.
-      const directRoomConfig = isDirectMessage
-        ? resolveMatrixRoomConfig({ rooms: params.roomsConfig, roomId, aliases: [] })
-        : undefined;
-      const roomStreamingMode =
-        roomConfig?.streaming?.mode ??
-        (directRoomConfig?.matchSource === "direct"
-          ? directRoomConfig.config?.streaming?.mode
-          : undefined);
+      // Delivery overrides never participate in room admission or tool policy.
+      const roomStreamingMode = params.accountConfig?.streaming?.rooms?.[roomId]?.mode;
       const effectiveStreaming = roomStreamingMode ?? streaming;
       const effectivePreviewToolProgressEnabled =
         roomStreamingMode === undefined

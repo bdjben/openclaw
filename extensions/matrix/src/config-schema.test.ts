@@ -131,17 +131,27 @@ describe("MatrixConfigSchema SecretInput", () => {
     expect(result.success).toBe(true);
   });
 
-  it.each(["rooms", "groups"] as const)(
-    "accepts a Matrix %s streaming mode override",
-    (roomKey) => {
-      const result = MatrixConfigSchema.safeParse({
-        homeserver: "https://matrix.example.org",
-        streaming: { mode: "progress" },
-        [roomKey]: { "!quiet:example.org": { streaming: { mode: "off" } } },
-      });
-      expect(result.success).toBe(true);
-    },
-  );
+  it("accepts room streaming overrides separately from room policy", () => {
+    expect(
+      MatrixConfigSchema.safeParse({
+        streaming: { mode: "progress", rooms: { "!quiet:example.org": { mode: "off" } } },
+      }).success,
+    ).toBe(true);
+  });
+
+  it.each(["*", "#alias:example.org", "room"])("rejects non-room-ID streaming key %s", (key) => {
+    expect(
+      MatrixConfigSchema.safeParse({ streaming: { rooms: { [key]: { mode: "off" } } } }).success,
+    ).toBe(false);
+  });
+
+  it.each(["groups", "rooms"])("rejects streaming under access policy %s", (key) => {
+    expect(
+      MatrixConfigSchema.safeParse({
+        [key]: { "!room:example.org": { streaming: { mode: "off" } } },
+      }).success,
+    ).toBe(false);
+  });
 
   it.each([
     ["scalar streaming mode", { streaming: "quiet" }],
