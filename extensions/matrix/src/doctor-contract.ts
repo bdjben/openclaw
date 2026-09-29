@@ -13,7 +13,7 @@ import {
   stripRetiredChannelKeys,
 } from "openclaw/plugin-sdk/runtime-doctor-migrations";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { matrixStreamingSchema } from "./config-schema.js";
+import { matrixStreamingSchema } from "./streaming-schema.js";
 import type { MatrixStreamingMode } from "./types.js";
 
 function parseMatrixStreamingMode(value: unknown): MatrixStreamingMode | null {
