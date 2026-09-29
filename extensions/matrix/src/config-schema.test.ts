@@ -131,18 +131,55 @@ describe("MatrixConfigSchema SecretInput", () => {
     expect(result.success).toBe(true);
   });
 
-  it("accepts room streaming overrides separately from room policy", () => {
-    expect(
-      MatrixConfigSchema.safeParse({
-        streaming: { mode: "progress", rooms: { "!quiet:example.org": { mode: "off" } } },
-      }).success,
-    ).toBe(true);
+  describe.each(["channel", "account"] as const)("%s room streaming overrides", (scope) => {
+    const configWithStreaming = (streaming: unknown) =>
+      scope === "channel" ? { streaming } : { accounts: { work: { streaming, customField: 1 } } };
+
+    it("preserves traditional and room-version-12 IDs separately from room policy", () => {
+      const input = configWithStreaming({
+        mode: "progress",
+        rooms: {
+          "!quiet:example.org": { mode: "off" },
+          "!my room:example.org": { mode: "quiet" },
+          "!UIZ0YzC99dC1AyEM6mGl0_XNP8u8xeCCt_Zk8Uhkp70": { mode: "partial" },
+        },
+      });
+      const result = MatrixConfigSchema.safeParse(input);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toMatchObject(input);
+      }
+    });
+
+    it.each(["*", "#alias:example.org", "room", "!", "!room", " !room:example.org"])(
+      "rejects non-literal room-ID streaming key %s",
+      (key) => {
+        expect(
+          MatrixConfigSchema.safeParse(configWithStreaming({ rooms: { [key]: { mode: "off" } } }))
+            .success,
+        ).toBe(false);
+      },
+    );
+
+    it("rejects an invalid nested room mode", () => {
+      expect(
+        MatrixConfigSchema.safeParse(
+          configWithStreaming({ rooms: { "!room:example.org": { mode: "typo" } } }),
+        ).success,
+      ).toBe(false);
+    });
   });
 
-  it.each(["*", "#alias:example.org", "room"])("rejects non-room-ID streaming key %s", (key) => {
-    expect(
-      MatrixConfigSchema.safeParse({ streaming: { rooms: { [key]: { mode: "off" } } } }).success,
-    ).toBe(false);
+  it("publishes the same streaming validation at channel and account scope", () => {
+    const schema = MatrixChannelConfigSchema.schema as {
+      properties: {
+        streaming: unknown;
+        accounts: { additionalProperties: { properties: { streaming: unknown } } };
+      };
+    };
+    expect(schema.properties.accounts.additionalProperties.properties.streaming).toEqual(
+      schema.properties.streaming,
+    );
   });
 
   it.each(["groups", "rooms"])("rejects streaming under access policy %s", (key) => {
