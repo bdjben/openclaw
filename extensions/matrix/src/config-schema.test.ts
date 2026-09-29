@@ -131,6 +131,18 @@ describe("MatrixConfigSchema SecretInput", () => {
     expect(result.success).toBe(true);
   });
 
+  it.each(["rooms", "groups"] as const)(
+    "accepts a Matrix %s streaming mode override",
+    (roomKey) => {
+      const result = MatrixConfigSchema.safeParse({
+        homeserver: "https://matrix.example.org",
+        streaming: { mode: "progress" },
+        [roomKey]: { "!quiet:example.org": { streaming: { mode: "off" } } },
+      });
+      expect(result.success).toBe(true);
+    },
+  );
+
   it.each([
     ["scalar streaming mode", { streaming: "quiet" }],
     ["boolean streaming", { streaming: true }],

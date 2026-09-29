@@ -23,6 +23,24 @@ Matrix reply streaming is opt-in. `streaming.mode` controls how OpenClaw deliver
 }
 ```
 
+To change the mode for selected rooms, set `streaming.mode` in their `groups` entries (`rooms` is also supported). Other rooms keep the channel or account mode:
+
+```json5
+{
+  channels: {
+    matrix: {
+      streaming: { mode: "progress" },
+      groups: {
+        "!quiet:example.org": { streaming: { mode: "off" } },
+        "!live:example.org": { streaming: { mode: "partial" } },
+      },
+    },
+  },
+}
+```
+
+This overrides only the mode; `streaming.progress`, `streaming.preview`, and `streaming.block` still come from the channel or account. An exact DM room ID can use the same override. Group-room aliases and the `"*"` room entry follow normal group-room matching; DMs use exact room IDs. Under `groupPolicy: "allowlist"`, a `groups` or `rooms` entry also allows that room, so keep your room access policy in mind when adding one.
+
 To keep live answer previews but hide interim tool/progress lines:
 
 ```json5

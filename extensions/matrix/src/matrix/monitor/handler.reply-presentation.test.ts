@@ -2,7 +2,7 @@ import { shouldAckReaction } from "openclaw/plugin-sdk/channel-feedback";
 import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-outbound";
 // Matrix tests cover the handler's reply presentation wiring.
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
+import type { GetReplyOptions, ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prepareMatrixReplyPayload } from "../../outbound.js";
 import { installMatrixMonitorTestRuntime } from "../../test-runtime.js";
@@ -20,7 +20,7 @@ const sendMessageMatrixMock = vi.hoisted(() =>
 );
 const editMessageMatrixMock = vi.hoisted(() => vi.fn(async () => "$edited"));
 const sendSingleTextMessageMatrixMock = vi.hoisted(() =>
-  vi.fn(async () => ({ messageId: "$draft1", roomId: "!room" })),
+  vi.fn(async (..._args: unknown[]) => ({ messageId: "$draft1", roomId: "!room" })),
 );
 const reactMatrixMessageMock = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => {}));
 
@@ -245,6 +245,112 @@ describe("matrix monitor handler reply presentation", () => {
       draftController.cancelProgressDraft();
       typingCallbacks.onCleanup?.();
       finalizeLive.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      name: "disables account previews in an overridden room",
+      accountMode: "partial",
+      roomMode: "off",
+      roomId: "!override:example.org",
+      isDirectMessage: false,
+      expectedMode: "off",
+    },
+    {
+      name: "keeps account previews in another room",
+      accountMode: "partial",
+      roomMode: "off",
+      roomId: "!other:example.org",
+      isDirectMessage: false,
+      expectedMode: "partial",
+    },
+    {
+      name: "enables quiet previews in an overridden room",
+      accountMode: "off",
+      roomMode: "quiet",
+      roomId: "!override:example.org",
+      isDirectMessage: false,
+      expectedMode: "quiet",
+    },
+    {
+      name: "keeps final-only delivery in another room",
+      accountMode: "off",
+      roomMode: "quiet",
+      roomId: "!other:example.org",
+      isDirectMessage: false,
+      expectedMode: "off",
+    },
+    {
+      name: "uses an exact DM room override",
+      accountMode: "off",
+      roomMode: "quiet",
+      roomId: "!override:example.org",
+      isDirectMessage: true,
+      expectedMode: "quiet",
+    },
+    {
+      name: "disables account progress drafts in an overridden room",
+      accountMode: "progress",
+      roomMode: "off",
+      roomId: "!override:example.org",
+      isDirectMessage: false,
+      expectedMode: "off",
+    },
+    {
+      name: "enables progress drafts in an overridden room",
+      accountMode: "off",
+      roomMode: "progress",
+      roomId: "!override:example.org",
+      isDirectMessage: false,
+      expectedMode: "progress",
+    },
+  ] as const)("$name", async ({ accountMode, roomMode, roomId, isDirectMessage, expectedMode }) => {
+    const captured = createDeferred<GetReplyOptions>();
+    const runGate = createDeferred<void>();
+    const { handler } = createMatrixHandlerTestHarness({
+      accountConfig: { streaming: { mode: accountMode } },
+      streaming: accountMode,
+      previewToolProgressEnabled: accountMode === "partial",
+      roomsConfig: {
+        "*": { requireMention: false },
+        "!override:example.org": { requireMention: false, streaming: { mode: roomMode } },
+      },
+      isDirectMessage,
+      dispatchInboundMessage: vi.fn(async (args: { replyOptions?: GetReplyOptions }) => {
+        captured.resolve(args.replyOptions ?? {});
+        await runGate.promise;
+        return { queuedFinal: true, counts: { final: 1, block: 0, tool: 0 } };
+      }) as never,
+    });
+    const handlerDone = handler(
+      roomId,
+      createMatrixTextMessageEvent({ eventId: "$room-mode", body: "hello" }),
+    );
+    try {
+      const replyOptions = await captured.promise;
+      if (expectedMode === "off") {
+        expect(replyOptions.onPartialReply).toBeUndefined();
+        expect(replyOptions.onPlanUpdate).toBeUndefined();
+        expect(replyOptions.onToolStart).toBeUndefined();
+        expect(sendSingleTextMessageMatrixMock).not.toHaveBeenCalled();
+      } else if (expectedMode === "progress") {
+        expect(replyOptions.onPlanUpdate).toBeTypeOf("function");
+        expect(replyOptions.onToolStart).toBeTypeOf("function");
+      } else {
+        const sent = createDeferred<string>();
+        sendSingleTextMessageMatrixMock.mockImplementationOnce(async (...args: unknown[]) => {
+          sent.resolve(args[0] as string);
+          return { messageId: "$draft1", roomId };
+        });
+        expect(replyOptions.onPartialReply).toBeTypeOf("function");
+        expect(replyOptions.onToolStart).toBeTypeOf("function");
+        await replyOptions.onPartialReply?.({ text: "Interim answer" });
+        expect(await sent.promise).toBe(roomId);
+      }
+    } finally {
+      runGate.resolve();
+      await handlerDone;
     }
   });
 });

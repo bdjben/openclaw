@@ -39,6 +39,8 @@ import { loadMatrixSendModule } from "./handler-runtime.js";
 import { createMatrixHandlerState } from "./handler-state.js";
 import type { MatrixHandlerRuntimeConfig, MatrixMonitorHandlerParams } from "./handler-types.js";
 import { createRoomHistoryTracker } from "./room-history.js";
+import { resolveMatrixRoomConfig } from "./rooms.js";
+import { resolveMatrixPreviewToolProgressEnabled } from "./streaming.js";
 import type { MatrixRawEvent } from "./types.js";
 import { EventType } from "./types.js";
 
@@ -271,6 +273,25 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         botLoopProtection,
       } = resolvedIngressResult;
 
+      // Group rooms use the config selected by ingress. DMs can opt in by exact room ID
+      // without making the group-room wildcard an implicit DM streaming override.
+      const directRoomConfig = isDirectMessage
+        ? resolveMatrixRoomConfig({ rooms: params.roomsConfig, roomId, aliases: [] })
+        : undefined;
+      const roomStreamingMode =
+        roomConfig?.streaming?.mode ??
+        (directRoomConfig?.matchSource === "direct"
+          ? directRoomConfig.config?.streaming?.mode
+          : undefined);
+      const effectiveStreaming = roomStreamingMode ?? streaming;
+      const effectivePreviewToolProgressEnabled =
+        roomStreamingMode === undefined
+          ? previewToolProgressEnabled
+          : resolveMatrixPreviewToolProgressEnabled(
+              params.accountConfig?.streaming,
+              effectiveStreaming,
+            );
+
       // Keep the per-room ingress gate focused on ordering-sensitive state updates.
       // Prompt/session enrichment below can run concurrently after the history snapshot is fixed.
       const inboundContext = await resolveMatrixInboundContext({
@@ -338,8 +359,8 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         (hookRunner?.hasHooks("message_sending") ?? false)
       );
       const draftController = await createMatrixDraftController({
-        streaming: allowProviderPreview ? streaming : "off",
-        previewToolProgressEnabled: allowProviderPreview && previewToolProgressEnabled,
+        streaming: allowProviderPreview ? effectiveStreaming : "off",
+        previewToolProgressEnabled: allowProviderPreview && effectivePreviewToolProgressEnabled,
         replyToMode,
         messageId,
         threadTarget,
@@ -357,7 +378,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         prefixOptions,
         humanDelay: resolveHumanDelayConfigImpl(cfg, _route.agentId),
         typingCallbacks,
-        streaming,
+        streaming: effectiveStreaming,
         draftStream,
         draftController,
         client,
