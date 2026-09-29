@@ -374,6 +374,44 @@ describe("matrix doctor streaming alias migration", () => {
 });
 
 describe("matrix doctor account streaming upgrade", () => {
+  it.each([
+    { preview: { toolProgress: false } },
+    { rooms: { "!kept:example.org": { mode: "off" } } },
+  ])("leaves valid mode-less account streaming unchanged: %j", (streaming) => {
+    const cfg = {
+      channels: {
+        matrix: { streaming: { mode: "progress" }, accounts: { work: { streaming } } },
+      },
+    };
+    expect(MatrixConfigSchema.safeParse(cfg.channels.matrix).success).toBe(true);
+    const result = normalizeCompatibilityConfig({ cfg: cfg as never });
+    expect(result.changes).toEqual([]);
+    expect(result.config).toBe(cfg);
+  });
+
+  it.each([
+    { rooms: { "*": { mode: "off" } } },
+    { unsupportedOption: true, rooms: { "!kept:example.org": { mode: "partial" } } },
+  ])("preserves missing-mode off fallback while repairing account streaming: %j", (legacy) => {
+    const cfg = {
+      channels: {
+        matrix: {
+          streaming: { mode: "progress" },
+          accounts: { work: { streaming: { preview: { toolProgress: false }, ...legacy } } },
+        },
+      },
+    };
+    const result = normalizeCompatibilityConfig({ cfg: cfg as never });
+    const streaming = result.config.channels?.matrix?.accounts?.work?.streaming;
+    expect(streaming).toEqual({
+      mode: "off",
+      preview: { toolProgress: false },
+      rooms: "unsupportedOption" in legacy ? { "!kept:example.org": { mode: "partial" } } : {},
+    });
+    expect(MatrixConfigSchema.safeParse(result.config.channels?.matrix).success).toBe(true);
+    expect(normalizeCompatibilityConfig({ cfg: result.config }).changes).toEqual([]);
+  });
+
   it("repairs formerly accepted account settings through the registered config contract", () => {
     const room = "!kept:example.org";
     const cfg = {

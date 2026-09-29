@@ -153,7 +153,12 @@ function migrateAccountStreaming(params: {
   if (!isRecord(params.entry.streaming)) {
     params.changes.push(`Reset ${params.pathPrefix}.streaming to the prior off fallback.`);
   }
-  if (!matrixStreamingSchema.shape.mode.safeParse(streaming.mode).success) {
+  // Repairing a mode-less legacy object must not opt into channel streaming
+  // when a retained (or emptied) room map enables the new defaults merge.
+  if (
+    streaming.mode === undefined ||
+    !matrixStreamingSchema.shape.mode.safeParse(streaming.mode).success
+  ) {
     streaming.mode = "off";
     params.changes.push(`Reset ${params.pathPrefix}.streaming.mode to the prior off fallback.`);
   }

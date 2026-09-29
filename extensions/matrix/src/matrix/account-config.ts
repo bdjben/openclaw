@@ -114,6 +114,7 @@ export function resolveMatrixAccountConfig(params: {
 }): MatrixConfig {
   const accountId = normalizeAccountId(params.accountId);
   const base = resolveMatrixBaseConfig(params.cfg);
+  const accountConfig = findMatrixAccountConfig(params.cfg, accountId);
   const merged = resolveMergedAccountConfig<MatrixConfig>({
     channelConfig: base,
     accounts: params.cfg.channels?.matrix?.accounts as
@@ -121,9 +122,16 @@ export function resolveMatrixAccountConfig(params: {
       | undefined,
     accountId,
     normalizeAccountId,
-    nestedObjectKeys: ["dm", "actions", "execApprovals", "botLoopProtection", "streaming"],
+    // Existing account streaming objects replace channel defaults. Only the new
+    // account room map opts into inheriting defaults for room-only overrides.
+    nestedObjectKeys: [
+      "dm",
+      "actions",
+      "execApprovals",
+      "botLoopProtection",
+      ...(accountConfig?.streaming?.rooms !== undefined ? ["streaming"] : []),
+    ],
   });
-  const accountConfig = findMatrixAccountConfig(params.cfg, accountId);
   const streamingRooms = {
     ...base.streaming?.rooms,
     ...accountConfig?.streaming?.rooms,
