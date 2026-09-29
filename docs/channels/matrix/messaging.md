@@ -43,6 +43,8 @@ To change the mode for selected rooms, set `channels.matrix.streaming.rooms.<roo
 
 This overrides only the mode; `streaming.progress`, `streaming.preview`, and `streaming.block` still come from the channel or account. Overrides use exact, case-sensitive room IDs for both group rooms and DMs. Account-level `streaming.rooms` entries override channel entries for the same room. These delivery settings do not admit rooms or replace wildcard tool restrictions: configure room access separately in `groups` or `rooms`.
 
+Channel and account streaming settings use the same validation. After upgrading, an account's previously ignored unknown nested fields, unsupported modes, or wildcard/alias room keys can make the configuration invalid. Run `openclaw config validate` to find the reported account and field, then edit `openclaw.json`: remove unsupported fields, correct the mode to `off`, `partial`, `quiet`, or `progress`, and replace wildcard/alias streaming keys with the exact room IDs you intend to configure. Run `openclaw config validate` again before restarting the gateway. Access-policy wildcards in `groups` or `rooms` remain separate and do not need to be removed.
+
 To keep live answer previews but hide interim tool/progress lines:
 
 ```json5
