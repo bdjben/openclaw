@@ -273,8 +273,23 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
       } = resolvedIngressResult;
 
       // Delivery overrides never participate in room admission or tool policy.
-      const roomStreamingMode = params.accountConfig?.streaming?.rooms?.[roomId]?.mode;
+      const roomStreaming = params.accountConfig?.streaming?.rooms?.[roomId];
+      const roomStreamingMode = roomStreaming?.mode;
       const effectiveStreaming = roomStreamingMode ?? streaming;
+      const roomCommentary = roomStreaming?.progress?.commentary;
+      const effectiveAccountConfig =
+        roomCommentary === undefined
+          ? params.accountConfig
+          : {
+              ...params.accountConfig,
+              streaming: {
+                ...params.accountConfig?.streaming,
+                progress: {
+                  ...params.accountConfig?.streaming?.progress,
+                  commentary: roomCommentary,
+                },
+              },
+            };
       const effectivePreviewToolProgressEnabled =
         roomStreamingMode === undefined
           ? previewToolProgressEnabled
@@ -355,7 +370,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         replyToMode,
         messageId,
         threadTarget,
-        accountConfig: params.accountConfig,
+        accountConfig: effectiveAccountConfig,
         cfg,
         accountId: _route.accountId,
         roomId,

@@ -3,7 +3,12 @@ import { z } from "zod";
 
 const matrixStreamingModeSchema = z.enum(["partial", "quiet", "progress", "off"]);
 
-const matrixRoomStreamingSchema = z.object({ mode: matrixStreamingModeSchema.optional() }).strict();
+const matrixRoomStreamingSchema = z
+  .object({
+    mode: matrixStreamingModeSchema.optional(),
+    progress: z.object({ commentary: z.boolean().optional() }).strict().optional(),
+  })
+  .strict();
 
 export const retiredMatrixStreamingMessage =
   'flat or scalar streaming values are no longer supported; use streaming.* and run "openclaw doctor --fix"';
@@ -35,6 +40,7 @@ export const matrixStreamingSchema = z
           maxLines: z.number().int().positive().optional(),
           maxLineChars: z.number().int().positive().optional(),
           toolProgress: z.boolean().optional(),
+          commentary: z.boolean().optional(),
           commandText: z.enum(["raw", "status"]).optional(),
         })
         .strict()

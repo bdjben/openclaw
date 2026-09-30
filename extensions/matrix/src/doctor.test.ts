@@ -376,7 +376,9 @@ describe("matrix doctor streaming alias migration", () => {
 describe("matrix doctor account streaming upgrade", () => {
   it.each([
     { preview: { toolProgress: false } },
+    { progress: { commentary: true } },
     { rooms: { "!kept:example.org": { mode: "off" } } },
+    { rooms: { "!kept:example.org": { progress: { commentary: false } } } },
   ])("leaves valid mode-less account streaming unchanged: %j", (streaming) => {
     const cfg = {
       channels: {
@@ -464,6 +466,38 @@ describe("matrix doctor account streaming upgrade", () => {
     const second = normalizeCompatibilityConfig({ cfg: result.config });
     expect(second.changes).toEqual([]);
     expect(second.config).toBe(result.config);
+  });
+
+  it("retains supported commentary while pruning invalid commentary leaves", () => {
+    const result = normalizeCompatibilityConfig({
+      cfg: {
+        channels: {
+          matrix: {
+            accounts: {
+              work: {
+                streaming: {
+                  progress: { commentary: true },
+                  rooms: {
+                    "!kept:example.org": { mode: "progress", progress: { commentary: false } },
+                    "!invalid:example.org": { mode: "off", progress: { commentary: "false" } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      } as never,
+    });
+    expect(result.config.channels?.matrix?.accounts?.work?.streaming).toEqual({
+      mode: "off",
+      progress: { commentary: true },
+      rooms: {
+        "!kept:example.org": { mode: "progress", progress: { commentary: false } },
+        "!invalid:example.org": { mode: "off", progress: {} },
+      },
+    });
+    expect(MatrixConfigSchema.safeParse(result.config.channels?.matrix).success).toBe(true);
+    expect(normalizeCompatibilityConfig({ cfg: result.config }).changes).toEqual([]);
   });
 
   it("keeps valid nested leaves and the prior off fallback when account values are invalid", () => {

@@ -283,6 +283,12 @@ pre-tool commentary/preamble narration (💬, for example "I'll check... then
 [Streaming and chunking](/concepts/streaming#commentary-progress-lane) for the
 shared config shape across channels.
 
+Matrix supports the channel/account toggle and an exact-room override at
+`channels.matrix.streaming.rooms.<roomId>.progress.commentary`. Omitted room
+values inherit the channel/account setting. See
+[Matrix message behavior](/channels/matrix/messaging) for account precedence and
+the distinction between the commentary lane and status headline.
+
 With the commentary lane enabled, preambles render only as those interleaved
 💬 lines; the status headline below stays out of the way so the lane keeps its
 documented shape.

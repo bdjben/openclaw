@@ -134,8 +134,15 @@ export function resolveMatrixAccountConfig(params: {
   });
   const streamingRooms = {
     ...base.streaming?.rooms,
-    ...accountConfig?.streaming?.rooms,
   };
+  for (const [roomId, entry] of Object.entries(accountConfig?.streaming?.rooms ?? {})) {
+    const inherited = streamingRooms[roomId];
+    streamingRooms[roomId] = {
+      ...inherited,
+      ...entry,
+      ...(entry.progress ? { progress: { ...inherited?.progress, ...entry.progress } } : {}),
+    };
+  }
   const groups = mergeMatrixRoomEntries(
     selectInheritedMatrixRoomEntries({
       entries: base.groups,

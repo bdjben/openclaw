@@ -165,6 +165,7 @@ describe("resolveMatrixAccount", () => {
     {},
     { preview: { toolProgress: false } },
     { block: { enabled: true } },
+    { progress: { commentary: true } },
     { mode: "quiet" as const, preview: { toolProgress: false } },
   ])("preserves account streaming replacement without an account room map: %j", (streaming) => {
     const channelRooms = { "!channel:example.org": { mode: "partial" as const } };
@@ -228,6 +229,28 @@ describe("resolveMatrixAccount", () => {
       rooms: { "!base:example.org": { mode: "off" }, "!shared:example.org": { mode: "off" } },
     });
   });
+
+  it.each([{ progress: { commentary: true } }, { mode: "quiet" as const }, {}])(
+    "merges account room leaves without erasing inherited delivery settings: %j",
+    (override) => {
+      const cfg: CoreConfig = {
+        channels: {
+          matrix: {
+            streaming: {
+              mode: "progress",
+              rooms: {
+                "!room:example.org": { mode: "off", progress: { commentary: false } },
+              },
+            },
+            accounts: { work: { streaming: { rooms: { "!room:example.org": override } } } },
+          },
+        },
+      };
+      expect(resolveMatrixAccount({ cfg, accountId: "work" }).config.streaming?.rooms).toEqual({
+        "!room:example.org": { mode: "off", progress: { commentary: false }, ...override },
+      });
+    },
+  );
 
   let prevEnv: Record<string, string | undefined> = {};
 

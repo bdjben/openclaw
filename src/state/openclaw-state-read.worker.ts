@@ -22,10 +22,18 @@ import {
 import { readWorkspaceStateSnapshotForDirectoryInDatabase } from "../agents/workspace-state-store.kernel.js";
 import { isChannelIngressReadCommand } from "../channels/message/ingress-queue-read-contract.js";
 import { readChannelIngressInDatabase } from "../channels/message/ingress-queue-read.worker.js";
+import { readCronScratchSnapshotInDatabase } from "../cron/scratch-read.kernel.js";
 import { readCronJobNamesInDatabase } from "../cron/store/job-name.js";
 import { resolveCronJobsStorePath } from "../cron/store/paths.js";
-import { readActiveCronRunReceiptOwnersInDatabase } from "../cron/store/run-receipt-read.js";
+import {
+  readActiveCronRunReceiptOwnersInDatabase,
+  readCronRunReceiptCurrentFactsInDatabase,
+} from "../cron/store/run-receipt-read.js";
 import { observeCronRunRecoveryInDatabase } from "../cron/store/run-recovery.read.js";
+import {
+  readSharedGitHubPublicationRequestInDatabase,
+  readSharedRepositoryGitHubPublicationInDatabase,
+} from "../gateway/github-publication-shared-read.kernel.js";
 import {
   readGitHubPublicationRequest,
   readKnownGitHubPublicationPullRequestUrlsInDatabase,
@@ -42,10 +50,13 @@ import {
   readWorkerSessionPlacementProjectionInDatabase,
 } from "../gateway/worker-environments/placement-read-projection.js";
 import { readWorkerPlacementChangeSnapshotInDatabase } from "../gateway/worker-environments/placement-row-codec.js";
+import { readWorkspaceJournalInDatabase } from "../gateway/worker-environments/placement-workspace-journal.js";
+import { isWorkspaceJournalReadCommand } from "../gateway/worker-environments/placement-workspace-journal.worker-contract.js";
 import {
   readWorkerEnvironmentFacts,
   readWorkerEnvironmentPrunePage,
 } from "../gateway/worker-environments/store-row-codec.js";
+import { getSqliteRuntimeCapabilities } from "../infra/bun-sqlite-library.js";
 import { executeDevicePairingRead } from "../infra/device-pairing-read.kernel.js";
 import { readExecApprovalsConfigRow } from "../infra/exec-approvals-sqlite.js";
 import { bunSqliteNativeCleanupPending } from "../infra/node-sqlite.js";
@@ -334,6 +345,18 @@ serveOwnedWorkerTasks(
                 observation: observeCronRunRecoveryInDatabase(db, command),
               };
             }
+            if (command.type === "cron.currentReceipt") {
+              return {
+                type: command.type,
+                facts: readCronRunReceiptCurrentFactsInDatabase(db, command),
+              };
+            }
+            if (command.type === "cron.scratch") {
+              return {
+                type: command.type,
+                snapshot: readCronScratchSnapshotInDatabase(db, command),
+              };
+            }
             if (command.type === "cron.jobNames") {
               const storePath = command.storePath ?? resolveCronJobsStorePath();
               return {
@@ -511,6 +534,16 @@ serveOwnedWorkerTasks(
                 lifecycle: readGitHubPublicationSessionLifecycle(command, db),
               };
             }
+            if (command.type === "githubPublication.sharedObservation") {
+              const { kind, session, selector, entry } = command.input;
+              return {
+                type: command.type,
+                row:
+                  kind === "repository"
+                    ? readSharedRepositoryGitHubPublicationInDatabase(db, session, selector, entry)
+                    : readSharedGitHubPublicationRequestInDatabase(db, session, selector, entry),
+              };
+            }
             if (command.type === "githubPublication.request") {
               return {
                 type: command.type,
@@ -615,6 +648,9 @@ serveOwnedWorkerTasks(
                 placements: readWorkerPlacementChangeSnapshotInDatabase(db, command.profileIds),
               };
             }
+            if (isWorkspaceJournalReadCommand(command)) {
+              return readWorkspaceJournalInDatabase(db, command);
+            }
             if (command.type === "workers.placementRecoveryCandidates") {
               return {
                 type: command.type,
@@ -639,7 +675,10 @@ serveOwnedWorkerTasks(
         );
         return { ok: true, sourceAdmitted: true, ...result };
       });
-      if (process.versions.bun && bunSqliteNativeCleanupPending) {
+      if (
+        !getSqliteRuntimeCapabilities().explicitSqliteCloseReleasesNativeResources &&
+        bunSqliteNativeCleanupPending
+      ) {
         nativeCleanupFailure ??= { error: undefined };
       }
       return nativeCleanupFailure ? { ...reply, nativeCleanupFailure } : reply;

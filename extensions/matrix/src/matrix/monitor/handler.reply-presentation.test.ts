@@ -272,6 +272,102 @@ describe("matrix monitor handler reply presentation", () => {
 
   it.each([
     {
+      mode: "progress",
+      commentary: false,
+      roomCommentary: true,
+      roomId: "!override:example.org",
+      expected: true,
+    },
+    {
+      mode: "progress",
+      commentary: true,
+      roomCommentary: false,
+      roomId: "!override:example.org",
+      expected: false,
+    },
+    {
+      mode: "progress",
+      commentary: false,
+      roomCommentary: true,
+      roomId: "!other:example.org",
+      expected: false,
+    },
+    {
+      mode: "progress",
+      commentary: true,
+      roomCommentary: undefined,
+      roomId: "!override:example.org",
+      expected: true,
+    },
+    {
+      mode: "partial",
+      commentary: true,
+      roomCommentary: true,
+      roomId: "!override:example.org",
+      expected: false,
+    },
+    {
+      mode: "off",
+      commentary: true,
+      roomCommentary: true,
+      roomId: "!override:example.org",
+      expected: undefined,
+    },
+  ] as const)(
+    "routes effective room commentary to the real draft: %j",
+    async ({ mode, commentary, roomCommentary, roomId, expected }) => {
+      const captured = createDeferred<GetReplyOptions>();
+      const runGate = createDeferred<void>();
+      const { handler } = createMatrixHandlerTestHarness({
+        accountConfig: {
+          streaming: {
+            mode,
+            progress: { commentary, label: false },
+            rooms: { "!override:example.org": { progress: { commentary: roomCommentary } } },
+          },
+        },
+        streaming: mode,
+        previewToolProgressEnabled: mode === "partial",
+        roomsConfig: { "*": { requireMention: false } },
+        dispatchInboundMessage: vi.fn(async (args: { replyOptions?: GetReplyOptions }) => {
+          captured.resolve(args.replyOptions ?? {});
+          await runGate.promise;
+          return { queuedFinal: true, counts: { final: 1, block: 0, tool: 0 } };
+        }) as never,
+      });
+      const handlerDone = handler(
+        roomId,
+        createMatrixTextMessageEvent({ eventId: "$commentary", body: "hello" }),
+      );
+      try {
+        const options = await captured.promise;
+        expect(options.commentaryProgressEnabled).toBe(expected);
+        if (mode === "progress") {
+          await options.onItemEvent?.({
+            itemId: "preamble-1",
+            kind: "preamble",
+            phase: "end",
+            progressText: "COMMENTARY-ROOM-PROOF",
+          });
+          if (!expected) {
+            await options.onPlanUpdate?.({
+              phase: "update",
+              steps: [{ step: "Read-only proof", status: "in_progress" }],
+            });
+          }
+          const body = sendSingleTextMessageMatrixMock.mock.calls.at(-1)?.[1] as string;
+          expect(body).toContain("COMMENTARY-ROOM-PROOF");
+          expect(body.includes("_COMMENTARY-ROOM-PROOF_")).toBe(expected);
+        }
+      } finally {
+        runGate.resolve();
+        await handlerDone;
+      }
+    },
+  );
+
+  it.each([
+    {
       name: "disables account previews in an overridden room",
       accountMode: "partial",
       roomMode: "off",

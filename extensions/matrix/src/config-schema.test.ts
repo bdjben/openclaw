@@ -135,6 +135,27 @@ describe("MatrixConfigSchema SecretInput", () => {
     const configWithStreaming = (streaming: unknown) =>
       scope === "channel" ? { streaming } : { accounts: { work: { streaming, customField: 1 } } };
 
+    it.each([true, false])("preserves channel/account and room commentary=%s", (commentary) => {
+      const input = configWithStreaming({
+        mode: "progress",
+        progress: { commentary },
+        rooms: { "!room:example.org": { progress: { commentary: !commentary } } },
+      });
+      const result = MatrixConfigSchema.safeParse(input);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toMatchObject(input);
+      }
+    });
+
+    it.each([
+      { progress: { commentary: "true" } },
+      { rooms: { "!room:example.org": { progress: { commentary: "false" } } } },
+      { rooms: { "!room:example.org": { progress: { toolProgress: true } } } },
+    ])("rejects invalid or unsupported commentary overrides: %j", (streaming) => {
+      expect(MatrixConfigSchema.safeParse(configWithStreaming(streaming)).success).toBe(false);
+    });
+
     it("preserves traditional and room-version-12 IDs separately from room policy", () => {
       const input = configWithStreaming({
         mode: "progress",
